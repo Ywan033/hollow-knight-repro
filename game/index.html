@@ -54,15 +54,17 @@
       <span><kbd>Space</kbd></span><span>跳跃（短按低跳，长按高跳）</span>
       <span><kbd>Shift</kbd></span><span>水平冲刺（有冷却，无无敌）</span>
       <span><kbd>J</kbd></span><span>挥击</span>
+      <span><kbd>E</kbd> / <kbd>↑</kbd></span><span>点燃烬灯台 · 在灯旁休息回满生命</span>
       <span><kbd>Esc</kbd> 暂停　<kbd>M</kbd> 静音</span><span><kbd>F3</kbd> 调试显示</span>
     </div>
-    <p>穿过荆棘坑，击败遗迹守卫，进入右侧尽头的拱门。</p>
+    <p>穿过三间遗迹：点燃烬灯台，击败守卫，进入尽头的拱门。</p>
     <button class="big" id="btnStart" type="button">开始</button>
     <p class="note">学习用玩法原型 · 全部画面与声音由程序生成</p>
   </div>
   <div class="overlay" id="ovPause" hidden>
     <h2>暂停</h2>
-    <p>A/D 移动 · Space 跳跃 · Shift 冲刺 · J 挥击</p>
+    <p>A/D 移动 · Space 跳跃 · Shift 冲刺 · J 挥击 · E 烬灯台</p>
+    <p class="note">“重新开始”会清除本局全部进度，包括已点燃的烬灯台。</p>
     <div class="row">
       <button class="big" id="btnResume" type="button">继续</button>
       <button class="big" id="btnRestartP" type="button">重新开始</button>
@@ -74,8 +76,9 @@
   </div>
   <div class="overlay" id="ovDead" hidden>
     <h2>灯火熄灭</h2>
-    <p>行者倒在了遗迹深处。</p>
-    <button class="big" id="btnRetry" type="button">再来一次</button>
+    <p id="deadMsg">行者倒在了遗迹深处。</p>
+    <button class="big" id="btnRetry" type="button">醒来</button>
+    <div class="row"><button id="btnRestartD" type="button">重新开始（清除进度）</button></div>
   </div>
   <div class="overlay" id="ovWin" hidden style="background: radial-gradient(ellipse at center, rgba(4,14,22,.35), rgba(2,6,10,.8))">
     <h2>穿过拱门</h2>
@@ -93,7 +96,6 @@
  * ===================================================================== */
 const CONFIG = {
   view: { w: 1280, h: 720 },
-  world: { w: 3200, h: 720, groundY: 600 },
   step: 1 / 120,          // 固定逻辑步长
   maxFrame: 0.1,          // 单帧最多累计的时间（挂起后不追帧）
   player: {
@@ -111,8 +113,7 @@ const CONFIG = {
   },
   guard: {
     w: 60, h: 88,         // 身体受击框
-    hp: 8, startX: 2650,
-    arenaMinX: 2000, arenaMaxX: 3000, patrolMin: 2350, patrolMax: 2900,
+    hp: 8,                // 出生点和活动范围在房间数据里（ROOMS.hall.enemies）
     patrolSpeed: 70, chaseSpeed: 165, idleTime: 1.0,
     sightRange: 460, loseTime: 1.5, noticeTime: 0.5,
     attackRange: 125,     // 与玩家中心距离小于该值时开始蓄力
@@ -122,39 +123,111 @@ const CONFIG = {
   },
   fx: { hitStop: 0.07, shakeHit: 5, shakeHurt: 9, shakeTime: 0.2 },
   camera: { lerp: 6, lookAhead: 90, lookLerp: 3 },
-  hazard: { damage: 1 },
+  crawler: {              // 锈壳虫：来回爬行的小敌人，身体接触造成伤害
+    w: 44, h: 26, hp: 2, speed: 55, turnPause: 0.35,
+    damage: 1, knockOnHit: 230, stun: 0.3, deathTime: 0.45,
+  },
+  hazard: { damage: 1, safeMargin: 100 },   // safeMargin：离荆棘坑边缘多远的地面才记为安全落点
+  room: { fadeOut: 0.16, fadeIn: 0.22, nameTime: 2.6 },
+  checkpoint: { reach: 56 },
   audio: { master: 0.8, ambient: 0.05 },
 };
-const VW = CONFIG.view.w, VH = CONFIG.view.h, WW = CONFIG.world.w, GY = CONFIG.world.groundY;
+const VW = CONFIG.view.w, VH = CONFIG.view.h;
 
-/* ---------------- Level ---------------- */
-const LEVEL = {
-  solids: [
-    { x: -400, y: GY, w: 1800, h: 400 },          // 左侧地面（到 x=1400）
-    { x: 1550, y: GY, w: 2100, h: 400 },          // 右侧地面
-    { x: -400, y: -600, w: 440, h: 1300 },        // 左墙（到 x=40）
-    { x: 3160, y: -600, w: 440, h: 1300 },        // 右墙
-    { x: 960, y: 552, w: 84, h: 48 },             // 练习区石块
-  ],
-  oneways: [
-    { x: 480, y: 528, w: 140, h: 16 },
-    { x: 1150, y: 520, w: 140, h: 16 },
-    { x: 1410, y: 455, w: 130, h: 16 },
-    { x: 1680, y: 520, w: 140, h: 16 },
-  ],
-  hazard: { x: 1400, y: 652, w: 150, h: 200, respawnL: 1300, respawnR: 1650, mid: 1475 },
-  door: { x: 3050, y: 470, w: 76, h: 130 },
-  dummy: { x: 800, w: 30, h: 70 },
-  start: { x: 160, y: GY },
-  lanterns: [300, 900, 1240, 1720, 2200, 2800],
-  hints: [
-    { x: 200, y: 430, t: 'A / D 移动' },
-    { x: 550, y: 430, t: 'Space 跳跃 · 长按更高' },
-    { x: 800, y: 470, t: 'J 挥击' },
-    { x: 1250, y: 400, t: 'Shift 冲刺越过荆棘' },
-    { x: 2080, y: 430, t: '看清蓄力 · 退开或跳起 · 趁喘息反击' },
-  ],
+/* ---------------- Rooms ----------------
+ * 三个房间的布局均为本项目自行设计，不是任何原作地图的复现。坐标是各房间自己的局部坐标（像素）。
+ *   solids     实心矩形             oneways  单向平台        hazards  荆棘坑（碰到扣血并回到最近的安全落点）
+ *   exits      出口触发区 → 目标房间的 entries[entry]         enemies  每次进入房间时按此重新生成
+ *   checkpoint 烬灯台（检查点）     door     最终出口        dummy    训练木桩
+ * 带出口的一侧：墙在 DOOR_TOP 以下留出门洞；门洞外另有一道实心挡块，即使触发失效也走不出房间。 */
+const GY = 600, DOOR_H = 170, DOOR_TOP = GY - DOOR_H;
+const edgeWest = open => open ? [{ x: -400, y: -600, w: 470, h: 600 + DOOR_TOP }, { x: -400, y: -600, w: 300, h: 1300 }] : [{ x: -400, y: -600, w: 440, h: 1300 }];
+const edgeEast = (W, open) => open ? [{ x: W - 70, y: -600, w: 470, h: 600 + DOOR_TOP }, { x: W + 100, y: -600, w: 300, h: 1300 }] : [{ x: W - 40, y: -600, w: 440, h: 1300 }];
+const exitWest = (to, entry) => ({ id: 'west', side: -1, x: -105, y: DOOR_TOP, w: 150, h: DOOR_H, to, entry });
+const exitEast = (W, to, entry) => ({ id: 'east', side: 1, x: W - 45, y: DOOR_TOP, w: 150, h: DOOR_H, to, entry });
+const entryWest = () => ({ x: 130, y: GY });          // 落点离出口触发区约 75px，不会进门就再次触发
+const entryEast = W => ({ x: W - 130, y: GY });
+const PAL = {   // 每个房间一套色调
+  teal:   { sky: ['#0d2a3a', '#143f50', '#0a1c28'], glow: 'rgba(90,200,220,A)', far: '#0a1b29', farLine: 'rgba(40,90,110,.18)', mid: '#0e2636', midHi: 'rgba(60,130,150,.25)', near: '#12303f', nearHi: 'rgba(80,160,180,.28)', beam: '120,220,240', fog: '70,160,180' },
+  moss:   { sky: ['#0f2e2b', '#17463f', '#0a1f1e'], glow: 'rgba(110,210,170,A)', far: '#0b201f', farLine: 'rgba(50,110,95,.18)', mid: '#0f2b2a', midHi: 'rgba(70,150,130,.25)', near: '#143733', nearHi: 'rgba(90,175,150,.28)', beam: '150,225,190', fog: '80,170,140' },
+  violet: { sky: ['#141f3a', '#1c2c52', '#0b1226'], glow: 'rgba(110,150,235,A)', far: '#0c1428', farLine: 'rgba(60,80,140,.2)', mid: '#111c36', midHi: 'rgba(90,110,190,.25)', near: '#162443', nearHi: 'rgba(110,130,210,.28)', beam: '140,170,245', fog: '90,120,200' },
 };
+const ROOMS = {
+  // 房间 1：入口回廊。沿用原型的教学段（移动、跳跃、挥击、荆棘坑），右端出口通向烬灯庭。
+  entry: { name: '入口回廊', w: 2000, seed: 0, pal: PAL.teal,
+    solids: [
+      { x: -400, y: GY, w: 1800, h: 400 },          // 左侧地面（到 x=1400）
+      { x: 1550, y: GY, w: 850, h: 400 },           // 右侧地面
+      { x: 960, y: 552, w: 84, h: 48 },             // 练习区石块
+      ...edgeWest(false), ...edgeEast(2000, true),
+    ],
+    oneways: [
+      { x: 480, y: 528, w: 140, h: 16 },
+      { x: 1150, y: 520, w: 140, h: 16 },
+      { x: 1410, y: 455, w: 130, h: 16 },
+      { x: 1680, y: 520, w: 140, h: 16 },
+    ],
+    hazards: [{ x: 1400, y: 652, w: 150, h: 200 }],
+    exits: [exitEast(2000, 'court', 'west')],
+    entries: { east: entryEast(2000) },
+    enemies: [],
+    dummy: { x: 800, y: GY, w: 30, h: 70 },
+    lanterns: [300, 900, 1240, 1720].map(x => ({ x, y: GY })),
+    hints: [
+      { x: 200, y: 430, t: 'A / D 移动' },
+      { x: 550, y: 430, t: 'Space 跳跃 · 长按更高' },
+      { x: 800, y: 470, t: 'J 挥击' },
+      { x: 1250, y: 400, t: 'Shift 冲刺越过荆棘' },
+      { x: 1850, y: 400, t: '烬灯庭 →' },
+    ],
+  },
+  // 房间 2：烬灯庭。两级台阶上的高台放烬灯台；东侧是带落脚石的宽荆棘坑，另有一条高处的平台路线。
+  court: { name: '烬灯庭', w: 2640, seed: 7, pal: PAL.moss,
+    solids: [
+      { x: -400, y: GY, w: 2050, h: 400 },          // 西侧地面（到 x=1650）
+      { x: 1950, y: GY, w: 1090, h: 400 },          // 东侧地面
+      { x: 700, y: 540, w: 300, h: 60 },            // 西台阶
+      { x: 1000, y: 480, w: 420, h: 120 },          // 高台（烬灯台）
+      { x: 1420, y: 540, w: 110, h: 60 },           // 东台阶
+      ...edgeWest(true), ...edgeEast(2640, true),
+    ],
+    oneways: [
+      { x: 1755, y: 560, w: 90, h: 16 },            // 荆棘坑中央的落脚石
+      { x: 1560, y: 440, w: 120, h: 16 },           // 高处路线
+      { x: 1800, y: 420, w: 120, h: 16 },
+    ],
+    hazards: [{ x: 1650, y: 652, w: 300, h: 200 }],
+    exits: [exitWest('entry', 'east'), exitEast(2640, 'hall', 'west')],
+    entries: { west: entryWest(), east: entryEast(2640) },
+    enemies: [
+      { id: 'c1', type: 'crawler', x: 520, y: GY, min: 380, max: 660, dir: -1 },
+      { id: 'c2', type: 'crawler', x: 2250, y: GY, min: 2160, max: 2340, dir: 1 },
+    ],
+    checkpoint: { id: 'court', x: 1210, y: 480 },
+    lanterns: [{ x: 250, y: GY }, { x: 840, y: 540 }, { x: 1590, y: GY }, { x: 2050, y: GY }, { x: 2440, y: GY }],
+    hints: [
+      { x: 430, y: 440, t: '锈壳虫 · 碰到会受伤' },
+      { x: 2420, y: 400, t: '守卫厅 →' },
+    ],
+  },
+  // 房间 3：守卫厅。沿用原型的守卫战和尽头拱门；击败守卫后拱门开启，进门即通关。
+  hall: { name: '守卫厅', w: 1600, seed: 13, pal: PAL.violet,
+    solids: [
+      { x: -400, y: GY, w: 2400, h: 400 },
+      ...edgeWest(true), ...edgeEast(1600, false),
+    ],
+    oneways: [],
+    hazards: [],
+    exits: [exitWest('court', 'east')],
+    entries: { west: entryWest() },
+    enemies: [{ id: 'guard', type: 'guard', x: 1050, y: GY, arenaMin: 400, arenaMax: 1400, patrolMin: 750, patrolMax: 1300 }],
+    door: { x: 1450, y: 470, w: 76, h: 130 },
+    lanterns: [{ x: 600, y: GY }, { x: 1200, y: GY }],
+    hints: [{ x: 480, y: 430, t: '看清蓄力 · 退开或跳起 · 趁喘息反击' }],
+  },
+};
+for (const id in ROOMS) ROOMS[id].id = id;
+const START = { room: 'entry', x: 160, y: GY };   // 未点燃任何烬灯台时的重生点
 
 /* ---------------- Utils ---------------- */
 const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
@@ -166,7 +239,7 @@ function rng(seed) { let a = seed >>> 0; return () => { a |= 0; a = a + 0x6D2B79
 function los(ax, ay, bx, by) { // 视线检测：线段采样是否穿过实心地形
   for (let i = 1; i < 12; i++) {
     const t = i / 12, x = lerp(ax, bx, t), y = lerp(ay, by, t);
-    for (const s of LEVEL.solids) if (x > s.x && x < s.x + s.w && y > s.y && y < s.y + s.h) return false;
+    for (const s of G.room.solids) if (x > s.x && x < s.x + s.w && y > s.y && y < s.y + s.h) return false;
   }
   return true;
 }
@@ -238,6 +311,9 @@ const SFX = {
   win:    { dur: 2.2, f(ac, o, t) { [392, 493.9, 587.3, 784].forEach((f, i) => { tone(ac, o, t + i * 0.17, { type: 'triangle', f0: f, dur: 0.9, peak: 0.14, a: 0.01 }); tone(ac, o, t + i * 0.17, { f0: f * 2, dur: 0.6, peak: 0.04, a: 0.01 }); }); } },
   thorn:  { dur: 0.35, f(ac, o, t) { noise(ac, o, t, { type: 'highpass', f0: 2600, dur: 0.12, peak: 0.2 }); tone(ac, o, t, { type: 'square', f0: 180, f1: 70, dur: 0.18, peak: 0.14 }); } },
   ui:     { dur: 0.15, f(ac, o, t) { tone(ac, o, t, { type: 'triangle', f0: 660, f1: 880, dur: 0.06, peak: 0.1 }); } },
+  crawlerDie: { dur: 0.4, f(ac, o, t) { tone(ac, o, t, { type: 'square', f0: 300, f1: 70, dur: 0.2, peak: 0.14 }); noise(ac, o, t, { type: 'lowpass', f0: 1800, f1: 300, dur: 0.22, peak: 0.16 }); } },
+  kindle: { dur: 0.9, f(ac, o, t) { noise(ac, o, t, { type: 'highpass', f0: 2600, dur: 0.3, peak: 0.1, a: 0.02 }); tone(ac, o, t, { type: 'triangle', f0: 330, f1: 660, dur: 0.5, peak: 0.14, a: 0.02 }); tone(ac, o, t + 0.12, { f0: 495, f1: 990, dur: 0.55, peak: 0.08, a: 0.02 }); } },
+  pass:   { dur: 0.45, f(ac, o, t) { noise(ac, o, t, { type: 'lowpass', f0: 260, f1: 900, dur: 0.3, peak: 0.14, a: 0.04 }); } },
 };
 function startAmbient(ac, out, t) {  // 低音量环境声：低频嗡鸣 + 缓慢起伏的风噪
   const g = ac.createGain(); g.gain.value = CONFIG.audio.ambient; g.connect(out);
@@ -300,28 +376,31 @@ async function audioSelfTest() {  // OfflineAudioContext 数值检查（不代�
 /* =====================================================================
  * Input
  * ===================================================================== */
-const KEYMAP = { KeyA: 'left', ArrowLeft: 'left', KeyD: 'right', ArrowRight: 'right', Space: 'jump', ShiftLeft: 'dash', ShiftRight: 'dash', KeyJ: 'attack' };
-const KEYFALLBACK = { a: 'KeyA', d: 'KeyD', j: 'KeyJ', m: 'KeyM', ' ': 'Space', spacebar: 'Space', shift: 'ShiftLeft', arrowleft: 'ArrowLeft', arrowright: 'ArrowRight', escape: 'Escape', esc: 'Escape', f3: 'F3' };
+const KEYMAP = { KeyA: 'left', ArrowLeft: 'left', KeyD: 'right', ArrowRight: 'right', Space: 'jump', ShiftLeft: 'dash', ShiftRight: 'dash', KeyJ: 'attack', KeyE: 'interact', ArrowUp: 'interact' };
+const KEYFALLBACK = { a: 'KeyA', d: 'KeyD', j: 'KeyJ', m: 'KeyM', e: 'KeyE', ' ': 'Space', spacebar: 'Space', shift: 'ShiftLeft', arrowleft: 'ArrowLeft', arrowright: 'ArrowRight', arrowup: 'ArrowUp', escape: 'Escape', esc: 'Escape', f3: 'F3' };
 const codeOf = e => e.code || KEYFALLBACK[String(e.key || '').toLowerCase()] || '';  // 个别环境 code 为空时按 key 兜底
-const inp = { left: false, right: false, jump: false, dash: false, attack: false, jumpP: false, dashP: false, atkP: false };
-function clearInput() { for (const k in inp) inp[k] = false; }
+const inp = { left: false, right: false, jump: false, dash: false, attack: false, interact: false, jumpP: false, dashP: false, atkP: false, interactP: false };
+const EDGE = { jump: 'jumpP', dash: 'dashP', attack: 'atkP', interact: 'interactP' };
+// 一个动作可以有多个键位（A 与 ←、D 与 →、左右 Shift、E 与 ↑）。按物理键分别记录，只要还有一个键按着，动作就保持按下。
+const heldCodes = new Set();
+const actionHeld = a => { for (const c of heldCodes) if (KEYMAP[c] === a) return true; return false; };
+function clearInput() { heldCodes.clear(); for (const k in inp) inp[k] = false; }
 window.addEventListener('keydown', e => {
   initAudio(); const code = codeOf(e);
   if (code === 'KeyM') { if (!e.repeat) toggleMute(); return; }
   if (code === 'F3' || code === 'Backquote') { e.preventDefault(); if (!e.repeat) G.debug = !G.debug; return; }
   if (code === 'Escape') { if (!e.repeat) { if (G.mode === 'play') setMode('pause'); else if (G.mode === 'pause') setMode('play'); } e.preventDefault(); return; }
   if (G.mode !== 'play') return;            // 菜单中让按钮自己处理 Space/Enter
-  const a = KEYMAP[codeOf(e)]; if (!a) return;
+  const a = KEYMAP[code]; if (!a) return;
   e.preventDefault();
   if (e.repeat) return;
-  if (!inp[a]) { if (a === 'jump') inp.jumpP = true; if (a === 'dash') inp.dashP = true; if (a === 'attack') inp.atkP = true; }
-  inp[a] = true;
+  if (!inp[a] && EDGE[a]) inp[EDGE[a]] = true;   // 同一动作的第二个键位按下不算新的一次按下
+  heldCodes.add(code); inp[a] = true;
 });
 window.addEventListener('keyup', e => {
-  const a = KEYMAP[codeOf(e)]; if (!a) return;
+  const code = codeOf(e), a = KEYMAP[code]; if (!a) return;
   if (G.mode === 'play') e.preventDefault();
-  // 左右各有两个键位：只有两键都松开才算松开（简单处理：直接松开）
-  inp[a] = false;
+  heldCodes.delete(code); inp[a] = actionHeld(a);
 });
 function onFocusLost() { clearInput(); if (G.mode === 'play') setMode('pause'); }
 window.addEventListener('blur', onFocusLost);
@@ -330,27 +409,76 @@ document.addEventListener('visibilitychange', () => { if (document.hidden) onFoc
 /* =====================================================================
  * Game state
  * ===================================================================== */
+/* 状态保留与重置规则（本原型的设计）：
+ *                     切换房间            死亡后重生              重新开始 / 通关后重玩
+ *   生命值            保留                回满                    回满
+ *   锈壳虫            进入的房间重新生成  重新生成                重新生成
+ *   守卫（未击败）    回到满血巡逻        回到满血巡逻            回到满血巡逻
+ *   守卫已击败、拱门  保留                保留                    清除
+ *   已点燃的烬灯台    保留                保留                    清除
+ *   用时与统计        继续累计            继续累计（倒下次数 +1） 清零
+ */
 const G = { mode: 'title', debug: /[?&]debug=1/.test(location.search), shakeOn: true, time: 0, steps: 0 };
-function newPlayer() {
-  return { x: LEVEL.start.x, y: LEVEL.start.y, vx: 0, vy: 0, facing: 1, onGround: true, coyoteT: 0, jumpBufT: 0, jumping: false,
+function newPlayer(x, y) {
+  return { x, y, vx: 0, vy: 0, facing: 1, onGround: true, groundKind: 'solid', coyoteT: 0, jumpBufT: 0, jumping: false,
     dashT: 0, dashCd: 0, dashDir: 1, airDash: false, atkT: -1, atkBufT: 0, atkFacing: 1, atkHit: new Set(),
     hp: CONFIG.player.maxHp, invT: 0, hurtT: 0, flashT: 0, dead: false, deadT: 0, landT: 0, runPhase: 0, dustT: 0,
-    cloakLag: 0, cloakFlare: 0, lastSafeX: LEVEL.start.x, state: 'idle' };
+    cloakLag: 0, cloakFlare: 0, safe: { x, y }, state: 'idle' };
 }
-function newGuard() {
-  return { x: CONFIG.guard.startX, y: GY, vx: 0, kvx: 0, facing: -1, dir: -1, state: 'patrol', t: 0, lostT: 0, hp: CONFIG.guard.hp, hpShown: CONFIG.guard.hp,
-    flashT: 0, hitDone: false, deadT: 0, walkPhase: 0, swings: 0 };
+function makeEnemy(d) {
+  if (d.type === 'guard') return { id: d.id, type: 'guard', home: d, x: d.x, y: d.y, vx: 0, kvx: 0, facing: -1, dir: -1, state: 'patrol', t: 0, lostT: 0,
+    hp: CONFIG.guard.hp, hpShown: CONFIG.guard.hp, flashT: 0, hitDone: false, deadT: 0, walkPhase: 0, swings: 0 };
+  return { id: d.id, type: 'crawler', home: d, x: d.x, y: d.y, kvx: 0, facing: d.dir || 1, dir: d.dir || 1, state: 'walk', t: 0,
+    hp: CONFIG.crawler.hp, flashT: 0, deadT: 0, walkPhase: 0 };
 }
-function resetGame() {
-  G.player = newPlayer(); G.guard = newGuard();
+// 进入房间：敌人按房间数据重新生成（已击败的守卫除外），粒子清空。玩家、进度和计时不在这里改。
+function loadRoom(id) {
+  G.roomId = id; G.room = ROOMS[id]; G.roomT = 0;
+  G.enemies = G.room.enemies.filter(d => !(d.type === 'guard' && G.prog.guardDefeated)).map(makeEnemy);
+  if (G.prog.guardDefeated) G.door.unlocked = true;
+  G.dummy = { wob: 0, wobV: 0 }; G.parts = []; G.ghosts = []; G.hitStop = 0;
+  G.prog.visited[id] = true;
+}
+function resetGame() {   // 整局重置：进度、检查点、统计全部清除
+  G.prog = { checkpoint: null, lit: {}, guardDefeated: false, visited: {} };
   G.door = { unlocked: false, openT: 0 };
-  G.dummy = { wob: 0, wobV: 0 };
-  G.cam = { x: 0, look: 0 }; G.shakeT = 0; G.shakeAmp = 0; G.hitStop = 0; G.runTime = 0; G.fade = 0; G.acc = 0;
-  G.parts = []; G.ghosts = [];
-  G.stats = { hitsDealt: 0, damageTaken: 0, swingsMade: 0, dashes: 0, jumps: 0, hazardFalls: 0 };
+  G.cam = { x: 0, look: 0 }; G.shakeT = 0; G.shakeAmp = 0; G.runTime = 0; G.fade = 0; G.acc = 0; G.trans = null; G.cpPulse = 0;
+  G.stats = { hitsDealt: 0, damageTaken: 0, swingsMade: 0, dashes: 0, jumps: 0, hazardFalls: 0, deaths: 0, roomChanges: 0, rests: 0, crawlerKills: 0 };
+  loadRoom(START.room);
+  G.player = newPlayer(START.x, START.y);
   clearInput();
 }
 resetGame();
+
+/* ---------------- 检查点与房间切换 ---------------- */
+function nearCheckpoint() {
+  const cp = G.room.checkpoint, p = G.player;
+  return !!cp && !p.dead && p.onGround && Math.abs(p.x - cp.x) < CONFIG.checkpoint.reach && Math.abs(p.y - cp.y) < 2;
+}
+function useCheckpoint() {   // 点燃或休息：设为重生点并回满生命。不写入磁盘，关闭页面后不保留。
+  const cp = G.room.checkpoint, p = G.player, first = !G.prog.lit[cp.id];
+  G.prog.lit[cp.id] = true; G.prog.checkpoint = { room: G.roomId, id: cp.id };
+  p.hp = CONFIG.player.maxHp; G.stats.rests++; G.cpPulse = 1;
+  sfx('kindle'); sparks(cp.x, cp.y - 62, first ? 24 : 10, '#ffc978');
+  $('sr').textContent = first ? '烬灯台已点燃，生命回满' : '在烬灯台旁休息，生命回满';
+}
+function enterRoom(id, entryId, fromFloorY) {   // 经出口进入：保留玩家状态和离地高度，只换位置
+  const p = G.player; loadRoom(id);
+  const en = G.room.entries[entryId], lift = clamp(fromFloorY - p.y, 0, DOOR_H - CONFIG.player.h - 10);
+  p.x = en.x; p.y = en.y - lift; if (lift === 0) { p.onGround = true; p.groundKind = 'solid'; }
+  p.safe = { x: en.x, y: en.y }; p.atkHit = new Set();
+  inp.jumpP = inp.dashP = inp.atkP = inp.interactP = false;
+  G.stats.roomChanges++;
+  updateCamera(0, true);
+}
+function respawn() {   // 死亡后：回到最近点燃的烬灯台；没有则回到入口。进度保留。
+  const cp = G.prog.checkpoint; let roomId = START.room, x = START.x, y = START.y;
+  if (cp) { const c = ROOMS[cp.room].checkpoint; roomId = cp.room; x = c.x - 34; y = c.y; }
+  loadRoom(roomId);
+  G.player = newPlayer(x, y); G.player.invT = CONFIG.player.respawnInvuln;
+  G.trans = null; G.shakeT = 0; G.shakeAmp = 0; G.cam.look = 0; G.fade = 1;
+  updateCamera(0, true); setMode('play');
+}
 
 function setMode(m) {
   const prev = G.mode; G.mode = m;
@@ -360,14 +488,17 @@ function setMode(m) {
   $('toolbar').hidden = m !== 'play';
   const focusBtn = { title: 'btnStart', pause: 'btnResume', dead: 'btnRetry', win: 'btnReplay' }[m];
   if (focusBtn) $(focusBtn).focus({ preventScroll: true }); else { if (document.activeElement && document.activeElement.blur) document.activeElement.blur(); canvas.focus({ preventScroll: true }); }
+  if (m === 'dead') {
+    $('deadMsg').textContent = G.prog.checkpoint ? '行者将在点燃的烬灯台旁醒来。' : '还没有点燃烬灯台，行者将回到入口。';
+  }
   if (m === 'win') {
-    $('winStats').textContent = `用时 ${G.runTime.toFixed(1)} 秒 · 受伤 ${G.stats.damageTaken} 次 · 命中守卫 ${G.stats.hitsDealt} 次`;
+    $('winStats').textContent = `用时 ${G.runTime.toFixed(1)} 秒 · 受伤 ${G.stats.damageTaken} 次 · 倒下 ${G.stats.deaths} 次 · 命中守卫 ${G.stats.hitsDealt} 次`;
   }
   $('sr').textContent = { title: '标题界面', play: '游戏进行中', pause: '已暂停', dead: '你倒下了', win: '胜利' }[m] || '';
   syncAudio();
   if (prev !== m && (m === 'pause' || (prev === 'pause' && m === 'play'))) sfx('ui');
 }
-function startGame() { initAudio(); resetGame(); setMode('play'); }
+function startGame() { initAudio(); resetGame(); updateCamera(0, true); setMode('play'); }
 function toggleMute() {
   Audio.muted = !Audio.muted;
   for (const id of ['btnMute', 'btnMute2']) { $(id).textContent = Audio.muted ? '声音：关' : '声音：开'; $(id).setAttribute('aria-pressed', String(Audio.muted)); }
@@ -378,7 +509,8 @@ function toggleShake() {
   for (const id of ['btnShake', 'btnShake2']) { $(id).textContent = G.shakeOn ? '震屏：开' : '震屏：关'; $(id).setAttribute('aria-pressed', String(G.shakeOn)); }
 }
 const onBtn = (id, fn) => $(id).addEventListener('click', e => { initAudio(); fn(); if (G.mode === 'play') e.currentTarget.blur(); });
-onBtn('btnStart', startGame); onBtn('btnRetry', startGame); onBtn('btnReplay', startGame); onBtn('btnRestartP', startGame);
+onBtn('btnStart', startGame); onBtn('btnReplay', startGame); onBtn('btnRestartP', startGame); onBtn('btnRestartD', startGame);
+onBtn('btnRetry', respawn);
 onBtn('btnResume', () => setMode('play')); onBtn('btnPause', () => setMode('pause'));
 onBtn('btnMute', toggleMute); onBtn('btnMute2', toggleMute); onBtn('btnShake', toggleShake); onBtn('btnShake2', toggleShake);
 
@@ -389,7 +521,8 @@ function atkPhase(p) { const c = CONFIG.player; if (p.atkT < 0) return 'none'; i
 function pAtkBox(p) { const c = CONFIG.player, f = p.atkFacing; const x0 = p.x + f * c.atkInner, x1 = p.x + f * c.atkReach; return { x: Math.min(x0, x1), y: p.y - c.atkTop, w: Math.abs(x1 - x0), h: c.atkTop - c.atkBottom }; }
 const gHurt = g => ({ x: g.x - CONFIG.guard.w / 2, y: g.y - CONFIG.guard.h, w: CONFIG.guard.w, h: CONFIG.guard.h });
 function gAtkBox(g) { const c = CONFIG.guard, f = g.facing; const x0 = g.x + f * c.hitInner, x1 = g.x + f * c.hitReach; return { x: Math.min(x0, x1), y: g.y - c.hitHeight, w: Math.abs(x1 - x0), h: c.hitHeight }; }
-const dummyBox = () => ({ x: LEVEL.dummy.x - LEVEL.dummy.w / 2, y: GY - LEVEL.dummy.h, w: LEVEL.dummy.w, h: LEVEL.dummy.h });
+const cHurt = e => ({ x: e.x - CONFIG.crawler.w / 2, y: e.y - CONFIG.crawler.h, w: CONFIG.crawler.w, h: CONFIG.crawler.h });
+const dummyBox = () => { const d = G.room.dummy; return { x: d.x - d.w / 2, y: d.y - d.h, w: d.w, h: d.h }; };
 
 /* ---------------- Particles ---------------- */
 function spawn(o) { if (G.parts.length < 500) G.parts.push(Object.assign({ vx: 0, vy: 0, g: 0, life: 0.5, size: 3, color: '#cfeef5', drag: 0, glow: false }, o, { max: o.life || 0.5 })); }
@@ -412,7 +545,7 @@ function moveBody(e, w, h, dx, dy) {
   if (dx !== 0) {
     e.x += dx;
     const b = { x: e.x - w / 2, y: e.y - h, w, h };
-    for (const s of LEVEL.solids) if (overlap(b, s)) {
+    for (const s of G.room.solids) if (overlap(b, s)) {
       if (dx > 0) e.x = s.x - w / 2; else e.x = s.x + s.w + w / 2;
       e.vx = 0; b.x = e.x - w / 2;
     }
@@ -420,12 +553,12 @@ function moveBody(e, w, h, dx, dy) {
   // 垂直
   const prevY = e.y; e.y += dy; e.onGround = false;
   const b = { x: e.x - w / 2, y: e.y - h, w, h };
-  for (const s of LEVEL.solids) if (overlap(b, s)) {
-    if (dy > 0) { e.y = s.y; e.onGround = true; } else if (dy < 0) { e.y = s.y + s.h + h; }
+  for (const s of G.room.solids) if (overlap(b, s)) {
+    if (dy > 0) { e.y = s.y; e.onGround = true; e.groundKind = 'solid'; } else if (dy < 0) { e.y = s.y + s.h + h; }
     e.vy = 0; b.y = e.y - h;
   }
-  if (dy >= 0) for (const o of LEVEL.oneways) {   // 单向平台：仅在下落且上一位置在其上方时站立
-    if (b.x < o.x + o.w && b.x + w > o.x && prevY <= o.y + 0.01 && e.y >= o.y) { e.y = o.y; e.vy = 0; e.onGround = true; b.y = e.y - h; }
+  if (dy >= 0) for (const o of G.room.oneways) {   // 单向平台：仅在下落且上一位置在其上方时站立
+    if (b.x < o.x + o.w && b.x + w > o.x && prevY <= o.y + 0.01 && e.y >= o.y) { e.y = o.y; e.vy = 0; e.onGround = true; e.groundKind = 'oneway'; b.y = e.y - h; }
   }
 }
 
@@ -439,7 +572,7 @@ function hurtPlayer(n, fromX, opt = {}) {
   p.vx = dir * c.knockX; p.vy = -c.knockY;
   shake(CONFIG.fx.shakeHurt); G.hitStop = Math.max(G.hitStop, 0.09);
   sparks(p.x, p.y - 26, 10, '#ffd9a0', dir);
-  if (p.hp <= 0) { p.dead = true; p.deadT = 0; sfx('playerDie'); sparks(p.x, p.y - 26, 26, '#f1e7d0'); }
+  if (p.hp <= 0) { p.dead = true; p.deadT = 0; G.stats.deaths++; sfx('playerDie'); sparks(p.x, p.y - 26, 26, '#f1e7d0'); }
   else sfx(opt.sound || 'hurt');
   return true;
 }
@@ -458,9 +591,11 @@ function updatePlayer(dt) {
   if (inp.jumpP) { p.jumpBufT = c.jumpBuffer; inp.jumpP = false; }
   if (inp.atkP) { p.atkBufT = c.atkBuffer; inp.atkP = false; }
   const dashPressed = inp.dashP; inp.dashP = false;
+  const interactPressed = inp.interactP; inp.interactP = false;
   p.jumpBufT -= dt; p.atkBufT -= dt; p.coyoteT -= dt; p.dashCd = Math.max(0, p.dashCd - dt); p.hurtT = Math.max(0, p.hurtT - dt);
   const dir = (inp.right ? 1 : 0) - (inp.left ? 1 : 0);
   const locked = p.hurtT > 0;
+  if (interactPressed && !locked && p.dashT <= 0 && nearCheckpoint()) useCheckpoint();
 
   // 冲刺
   if (dashPressed && !locked && p.dashT <= 0 && p.dashCd <= 0 && !(p.airDash && !p.onGround)) {
@@ -492,15 +627,17 @@ function updatePlayer(dt) {
     p.vy = Math.min(p.vy + c.gravity * dt, c.maxFall);
   }
   // 守卫身体的柔性推挤（无接触伤害）
-  let push = 0; const g = G.guard;
-  if (g.state !== 'dead' && Math.abs(p.x - g.x) < 30 && p.y > g.y - 84) push = sign(p.x - g.x) * 240;
+  let push = 0;
+  for (const g of G.enemies) if (g.type === 'guard' && g.state !== 'dead' && Math.abs(p.x - g.x) < 30 && p.y > g.y - 84) push = sign(p.x - g.x) * 240;
 
   const wasGround = p.onGround, fallV = p.vy;
   moveBody(p, c.w, c.h, (p.vx + push) * dt, p.vy * dt);
   if (p.onGround) {
     p.coyoteT = c.coyote; p.airDash = false;
     if (!wasGround && fallV > 260) { p.landT = 0.12; sfx('land'); puff(p.x, p.y, 6, 'rgba(170,225,235,.5)', 90); }
-    if (Math.abs(p.x - LEVEL.hazard.mid) > 120 && p.y === GY) p.lastSafeX = p.x;
+    // 安全落点：站在实心地面上、不在受击硬直中、离所有荆棘坑边缘足够远
+    const m = CONFIG.hazard.safeMargin;
+    if (p.groundKind === 'solid' && p.hurtT <= 0 && G.room.hazards.every(hz => p.x < hz.x - m || p.x > hz.x + hz.w + m)) { p.safe.x = p.x; p.safe.y = p.y; }
   }
   // 动画量
   const fwd = clamp(p.vx * p.facing / c.runSpeed, -1, 1.6);
@@ -510,10 +647,10 @@ function updatePlayer(dt) {
   p.state = locked ? 'hurt' : p.dashT > 0 ? 'dash' : p.atkT >= 0 ? 'attack:' + atkPhase(p) : !p.onGround ? (p.vy < 0 ? 'jump' : 'fall') : Math.abs(p.vx) > 40 ? 'run' : 'idle';
 }
 
-function setGuard(g, s) { g.state = s; g.t = 0; }
-function killGuard(g) { setGuard(g, 'dead'); g.deadT = 0; g.vx = 0; sfx('guardDie'); shake(10); sparks(g.x, g.y - 50, 30, '#ffb070'); }
-function updateGuard(dt) {
-  const g = G.guard, c = CONFIG.guard, p = G.player;
+function setEnemy(e, s) { e.state = s; e.t = 0; }
+function killGuard(g) { setEnemy(g, 'dead'); g.deadT = 0; g.vx = 0; G.prog.guardDefeated = true; sfx('guardDie'); shake(10); sparks(g.x, g.y - 50, 30, '#ffb070'); }
+function updateGuard(g, dt) {
+  const c = CONFIG.guard, h = g.home, p = G.player;   // h：该守卫在房间数据里的活动范围
   g.flashT = Math.max(0, g.flashT - dt); g.t += dt;
   g.hpShown = approach(g.hpShown, g.hp, dt * 3);
   if (g.state === 'dead') {
@@ -523,91 +660,129 @@ function updateGuard(dt) {
     return;
   }
   const dx = p.x - g.x, adx = Math.abs(dx);
-  const sees = !p.dead && p.x > c.arenaMinX - 170 && adx < c.sightRange && los(g.x, g.y - 60, p.x, p.y - 25);
+  const sees = !p.dead && p.x > h.arenaMin - 170 && adx < c.sightRange && los(g.x, g.y - 60, p.x, p.y - 25);
   g.vx = 0;
   switch (g.state) {
     case 'patrol':
       g.facing = g.dir; g.vx = g.dir * c.patrolSpeed;
-      if ((g.dir > 0 && g.x >= c.patrolMax) || (g.dir < 0 && g.x <= c.patrolMin)) { g.dir = -g.dir; setGuard(g, 'idle'); }
-      if (sees) { setGuard(g, 'notice'); sfx('alert'); }
+      if ((g.dir > 0 && g.x >= h.patrolMax) || (g.dir < 0 && g.x <= h.patrolMin)) { g.dir = -g.dir; setEnemy(g, 'idle'); }
+      if (sees) { setEnemy(g, 'notice'); sfx('alert'); }
       break;
     case 'idle':
-      if (g.t > c.idleTime) setGuard(g, 'patrol');
-      if (sees) { setGuard(g, 'notice'); sfx('alert'); }
+      if (g.t > c.idleTime) setEnemy(g, 'patrol');
+      if (sees) { setEnemy(g, 'notice'); sfx('alert'); }
       break;
     case 'notice':
-      g.facing = sign(dx); if (g.t > c.noticeTime) { setGuard(g, 'chase'); g.lostT = 0; }
+      g.facing = sign(dx); if (g.t > c.noticeTime) { setEnemy(g, 'chase'); g.lostT = 0; }
       break;
     case 'chase':
       if (adx > 6) g.facing = sign(dx);
       g.lostT = sees ? 0 : g.lostT + dt;
-      if (g.lostT > c.loseTime) { g.dir = g.x > (c.patrolMin + c.patrolMax) / 2 ? -1 : 1; setGuard(g, 'patrol'); break; }
-      if (sees && adx < c.attackRange) { setGuard(g, 'windup'); sfx('charge'); }
+      if (g.lostT > c.loseTime) { g.dir = g.x > (h.patrolMin + h.patrolMax) / 2 ? -1 : 1; setEnemy(g, 'patrol'); break; }
+      if (sees && adx < c.attackRange) { setEnemy(g, 'windup'); sfx('charge'); }
       else if (adx > c.attackRange - 25) g.vx = g.facing * c.chaseSpeed;
       break;
     case 'windup':
-      if (g.t > c.windup) { setGuard(g, 'swing'); g.hitDone = false; g.swings++; sfx('guardSwing'); }
+      if (g.t > c.windup) { setEnemy(g, 'swing'); g.hitDone = false; g.swings++; sfx('guardSwing'); }
       break;
     case 'swing':
       g.vx = g.facing * c.lunge;
-      if (g.t > c.swingActive) { setGuard(g, 'recover'); puff(g.x + g.facing * 100, g.y, 8, 'rgba(255,190,130,.45)', 90); shake(3); }
+      if (g.t > c.swingActive) { setEnemy(g, 'recover'); puff(g.x + g.facing * 100, g.y, 8, 'rgba(255,190,130,.45)', 90); shake(3); }
       break;
     case 'recover':
-      if (g.t > c.recover) setGuard(g, p.dead ? 'patrol' : 'chase');
+      if (g.t > c.recover) setEnemy(g, p.dead ? 'patrol' : 'chase');
       break;
   }
   g.x += (g.vx + g.kvx) * dt; g.kvx *= Math.exp(-9 * dt);
-  g.x = clamp(g.x, c.arenaMinX, c.arenaMaxX);
+  g.x = clamp(g.x, h.arenaMin, h.arenaMax);
   if (Math.abs(g.vx) > 1) g.walkPhase += Math.abs(g.vx) * dt * 0.045;
+}
+// 锈壳虫：在房间数据给定的 [min, max] 之间来回爬，不追踪玩家；碰到身体会受伤。
+function updateCrawler(e, dt) {
+  const c = CONFIG.crawler, h = e.home;
+  e.flashT = Math.max(0, e.flashT - dt); e.t += dt;
+  if (e.state === 'dead') { e.deadT += dt; return; }
+  let vx = 0;
+  if (e.state === 'stun') { if (e.t > c.stun) setEnemy(e, 'walk'); }
+  else if (e.state === 'turn') { if (e.t > c.turnPause) { e.dir = -e.dir; e.facing = e.dir; setEnemy(e, 'walk'); } }
+  else if ((e.dir > 0 && e.x >= h.max) || (e.dir < 0 && e.x <= h.min)) setEnemy(e, 'turn');
+  else { vx = e.dir * c.speed; e.facing = e.dir; e.walkPhase += c.speed * dt * 0.14; }
+  e.x = clamp(e.x + (vx + e.kvx) * dt, h.min, h.max); e.kvx *= Math.exp(-9 * dt);
+}
+function updateEnemies(dt) {
+  for (const e of G.enemies) (e.type === 'guard' ? updateGuard : updateCrawler)(e, dt);
+  for (let i = G.enemies.length - 1; i >= 0; i--) { const e = G.enemies[i]; if (e.type === 'crawler' && e.state === 'dead' && e.deadT > CONFIG.crawler.deathTime) G.enemies.splice(i, 1); }
 }
 
 function updateCombat() {
-  const p = G.player, g = G.guard, cp = CONFIG.player, cg = CONFIG.guard;
+  const p = G.player, cp = CONFIG.player, cg = CONFIG.guard, cc = CONFIG.crawler, room = G.room;
   // 玩家挥击：仅有效帧，单次挥击对同一目标至多一次
   if (!p.dead && atkPhase(p) === 'active') {
     const ab = pAtkBox(p);
-    if (g.state !== 'dead' && !p.atkHit.has('guard') && overlap(ab, gHurt(g)) && los(p.x, p.y - 28, g.x, g.y - 44)) {
-      p.atkHit.add('guard'); g.hp -= cp.atkDamage; g.flashT = 0.12; G.stats.hitsDealt++;
-      if (g.state !== 'windup' && g.state !== 'swing') g.kvx = p.atkFacing * cg.knockOnHit;
-      G.hitStop = CONFIG.fx.hitStop; shake(CONFIG.fx.shakeHit); sfx('hit');
-      sparks(clamp(p.x + p.atkFacing * 60, g.x - 30, g.x + 30), p.y - 30, 12, '#fff3d0', p.atkFacing);
-      if (g.hp <= 0) { g.hp = 0; killGuard(g); }
-      else if (g.state === 'patrol' || g.state === 'idle') { setGuard(g, 'notice'); sfx('alert'); }
+    for (const e of G.enemies) {
+      if (e.state === 'dead' || p.atkHit.has(e.id)) continue;
+      if (e.type === 'guard') {
+        if (!overlap(ab, gHurt(e)) || !los(p.x, p.y - 28, e.x, e.y - 44)) continue;
+        p.atkHit.add(e.id); e.hp -= cp.atkDamage; e.flashT = 0.12; G.stats.hitsDealt++;
+        if (e.state !== 'windup' && e.state !== 'swing') e.kvx = p.atkFacing * cg.knockOnHit;
+        G.hitStop = CONFIG.fx.hitStop; shake(CONFIG.fx.shakeHit); sfx('hit');
+        sparks(clamp(p.x + p.atkFacing * 60, e.x - 30, e.x + 30), p.y - 30, 12, '#fff3d0', p.atkFacing);
+        if (e.hp <= 0) { e.hp = 0; killGuard(e); }
+        else if (e.state === 'patrol' || e.state === 'idle') { setEnemy(e, 'notice'); sfx('alert'); }
+      } else {
+        if (!overlap(ab, cHurt(e)) || !los(p.x, p.y - 28, e.x, e.y - 14)) continue;
+        p.atkHit.add(e.id); e.hp -= cp.atkDamage; e.flashT = 0.12; e.kvx = p.atkFacing * cc.knockOnHit;
+        G.hitStop = CONFIG.fx.hitStop; shake(CONFIG.fx.shakeHit); sfx('hit');
+        sparks(e.x, e.y - 16, 10, '#fff3d0', p.atkFacing);
+        if (e.hp <= 0) { e.hp = 0; setEnemy(e, 'dead'); e.deadT = 0; G.stats.crawlerKills++; sfx('crawlerDie'); sparks(e.x, e.y - 14, 16, '#ffb070'); }
+        else setEnemy(e, 'stun');
+      }
     }
-    if (!p.atkHit.has('dummy') && overlap(ab, dummyBox())) {
+    const dm = room.dummy;
+    if (dm && !p.atkHit.has('dummy') && overlap(ab, dummyBox())) {
       p.atkHit.add('dummy'); G.dummy.wobV += p.atkFacing * 9; G.hitStop = CONFIG.fx.hitStop * 0.7; shake(3); sfx('hit');
-      sparks(LEVEL.dummy.x, p.y - 30, 8, '#d8f4ff', p.atkFacing);
+      sparks(dm.x, p.y - 30, 8, '#d8f4ff', p.atkFacing);
     }
   }
-  // 守卫横扫：仅 swing 有效期，单次挥击至多一次，需视线
-  if (g.state === 'swing' && !g.hitDone && !p.dead && overlap(gAtkBox(g), pHurt(p)) && los(g.x, g.y - 40, p.x, p.y - 25)) {
-    if (hurtPlayer(cg.damage, g.x)) g.hitDone = true;
+  // 敌人对玩家。守卫：仅 swing 有效期，单次横扫至多一次，需视线。锈壳虫：身体接触，受击无敌期间不重复扣血。
+  for (const e of G.enemies) {
+    if (p.dead || e.state === 'dead') continue;
+    if (e.type === 'guard') {
+      if (e.state === 'swing' && !e.hitDone && overlap(gAtkBox(e), pHurt(p)) && los(e.x, e.y - 40, p.x, p.y - 25) && hurtPlayer(cg.damage, e.x)) e.hitDone = true;
+    } else if (overlap(cHurt(e), pHurt(p))) hurtPlayer(cc.damage, e.x);
   }
-  // 危险区
-  const hz = LEVEL.hazard;
-  if (!p.dead && overlap(pHurt(p), hz)) {
+  // 危险区：扣血并回到最近的安全落点
+  for (const hz of room.hazards) {
+    if (p.dead || !overlap(pHurt(p), hz)) continue;
     G.stats.hazardFalls++;
     hurtPlayer(CONFIG.hazard.damage, p.x, { force: true, sound: 'thorn' });
-    if (!p.dead) {  // 回到安全地面（远离荆棘和守卫）
-      p.x = p.lastSafeX < hz.mid ? hz.respawnL : hz.respawnR; p.y = GY; p.vx = 0; p.vy = 0; p.onGround = true;
-      p.invT = cp.respawnInvuln; p.hurtT = 0.35; p.dashT = 0; G.fade = 1; p.lastSafeX = p.x;
+    if (!p.dead) {
+      p.x = p.safe.x; p.y = p.safe.y; p.vx = 0; p.vy = 0; p.onGround = true; p.groundKind = 'solid';
+      p.invT = cp.respawnInvuln; p.hurtT = 0.35; p.dashT = 0; G.fade = 1;
     } else { p.vx = 0; p.vy = -300; }
+    break;
   }
   // 训练木桩
   const d = G.dummy; d.wobV += -d.wob * 0.25; d.wobV *= 0.92; d.wob += d.wobV * 0.1;
-  // 出口
+  // 最终出口：守卫被击败后开启，进入即通关
   if (G.door.unlocked) {
     G.door.openT = Math.min(1, G.door.openT + CONFIG.step / 0.9);
-    if (G.door.openT >= 0.6 && !p.dead && overlap(pHurt(p), LEVEL.door)) { sfx('win'); setMode('win'); }
+    if (room.door && G.door.openT >= 0.6 && !p.dead && overlap(pHurt(p), room.door)) { sfx('win'); setMode('win'); }
   }
 }
 
+function updateExits() {   // 走进出口触发区 → 开始淡出；切换期间不再触发
+  const p = G.player; if (p.dead || G.trans) return;
+  const hb = pHurt(p);
+  for (const ex of G.room.exits) if (overlap(hb, ex)) { G.trans = { phase: 'out', t: 0, to: ex.to, entry: ex.entry, floorY: ex.y + ex.h }; sfx('pass'); return; }
+}
+
 function updateCamera(dt, snap) {
-  const p = G.player, c = CONFIG.camera, cam = G.cam;
+  const p = G.player, c = CONFIG.camera, cam = G.cam, maxX = G.room.w - VW;
   cam.look = lerp(cam.look, p.facing * c.lookAhead, 1 - Math.exp(-c.lookLerp * dt));
-  const tx = clamp(p.x + cam.look - VW / 2, 0, WW - VW);
+  const tx = clamp(p.x + cam.look - VW / 2, 0, maxX);
   cam.x = snap ? tx : lerp(cam.x, tx, 1 - Math.exp(-c.lerp * dt));
-  cam.x = clamp(cam.x, 0, WW - VW);
+  cam.x = clamp(cam.x, 0, maxX);
 }
 
 function step(dt) {
@@ -615,12 +790,20 @@ function step(dt) {
   if (G.shakeT > 0) G.shakeT -= dt;
   G.fade = Math.max(0, G.fade - dt * 2.5);
   if (G.mode !== 'play') { if (G.mode !== 'pause') updateParts(dt); return; }
+  G.roomT += dt; G.cpPulse = Math.max(0, G.cpPulse - dt * 1.6);
+  if (G.trans) {   // 房间切换：淡出期间模拟静止，换房后边淡入边恢复操作
+    const tr = G.trans; tr.t += dt;
+    if (tr.phase === 'out') { if (tr.t < CONFIG.room.fadeOut) return; enterRoom(tr.to, tr.entry, tr.floorY); tr.phase = 'in'; tr.t = 0; }
+    else if (tr.t >= CONFIG.room.fadeIn) G.trans = null;
+  }
   if (G.hitStop > 0) { G.hitStop -= dt; return; }
   G.runTime += dt;
   updatePlayer(dt);
   if (G.mode !== 'play') return;
-  updateGuard(dt);
+  updateEnemies(dt);
   updateCombat();
+  if (G.mode !== 'play') return;
+  updateExits();
   updateCamera(dt);
   updateParts(dt);
 }
@@ -631,8 +814,8 @@ function step(dt) {
 function mk(w, h) { const c = document.createElement('canvas'); c.width = w; c.height = h; return c; }
 function rr(g, x, y, w, h, r) { g.beginPath(); g.moveTo(x + r, y); g.lineTo(x + w - r, y); g.quadraticCurveTo(x + w, y, x + w, y + r); g.lineTo(x + w, y + h - r); g.quadraticCurveTo(x + w, y + h, x + w - r, y + h); g.lineTo(x + r, y + h); g.quadraticCurveTo(x, y + h, x, y + h - r); g.lineTo(x, y + r); g.quadraticCurveTo(x, y, x + r, y); g.closePath(); }
 function glow(g, x, y, r, col, a) { const gr = g.createRadialGradient(x, y, 0, x, y, r); gr.addColorStop(0, col.replace('A', a)); gr.addColorStop(1, col.replace('A', 0)); g.fillStyle = gr; g.fillRect(x - r, y - r, r * 2, r * 2); }
-const PAD = 40;
-function layer(factor, paint) { const w = Math.ceil(VW + (WW - VW) * factor) + PAD * 2, c = mk(w, VH + PAD * 2); const g = c.getContext('2d'); g.translate(PAD, PAD); paint(g, w - PAD * 2); return { c, factor }; }
+const PAD = 40, TOFF = 120;
+function layer(W, factor, paint) { const w = Math.ceil(VW + (W - VW) * factor) + PAD * 2, c = mk(w, VH + PAD * 2); const g = c.getContext('2d'); g.translate(PAD, PAD); paint(g, w - PAD * 2); return { c, factor }; }
 
 function column(g, x, top, base, w, col, hi, R) {
   g.fillStyle = col; g.fillRect(x - w / 2, top, w, base - top);
@@ -641,89 +824,128 @@ function column(g, x, top, base, w, col, hi, R) {
   if (hi) { g.fillStyle = hi; g.fillRect(x - w / 2, top + 19, 3, base - top - 33); g.globalAlpha = .35; for (let i = 1; i < 4; i++) g.fillRect(x - w / 2 + i * w / 4, top + 24, 2, base - top - 44); g.globalAlpha = 1; }
   if (R && R() < .5) { g.globalCompositeOperation = 'destination-out'; g.beginPath(); const yy = top - 2; g.moveTo(x - w, yy); g.lineTo(x - w / 2 + R() * w, yy + 30 + R() * 50); g.lineTo(x + w, yy + 5 + R() * 20); g.lineTo(x + w, yy - 30); g.lineTo(x - w, yy - 30); g.fill(); g.globalCompositeOperation = 'source-over'; }
 }
-const LAYERS = [];
-function buildLayers() {
-  // 远景：高拱廊剪影 + 光束
-  LAYERS.push(layer(0.12, (g, w) => {
-    const R = rng(11); g.fillStyle = '#0a1b29'; g.fillRect(-PAD, -PAD, w + PAD * 2, VH + PAD * 2);
+// 沿一条边每 2px 采样，返回满足 test 的连续区间（用于找出石块暴露在外的顶面和侧面）
+function runs1d(a0, a1, test) {
+  const out = []; let st = null;
+  for (let v = a0; v < a1; v += 2) { const ok = test(v + 1); if (ok && st === null) st = v; else if (!ok && st !== null) { out.push([st, v]); st = null; } }
+  if (st !== null) out.push([st, a1]);
+  return out;
+}
+// 按房间数据生成该房间的全部离屏画布：三层视差、地形层、前景层。每个房间只生成一次并缓存。
+function buildRoomGfx(room) {
+  const W = room.w, pal = room.pal, seed = room.seed, layers = [];
+  // 远景：高拱廊剪影
+  layers.push(layer(W, 0.12, (g, w) => {
+    const R = rng(11 + seed); g.fillStyle = pal.far; g.fillRect(-PAD, -PAD, w + PAD * 2, VH + PAD * 2);
     g.globalCompositeOperation = 'destination-out';
     for (let x = 30; x < w; x += 250) { const r = 92, cy = 250 + R() * 40; g.beginPath(); g.moveTo(x, VH + PAD); g.lineTo(x, cy); g.quadraticCurveTo(x, cy - r * 1.5, x + r, cy - r * 1.9); g.quadraticCurveTo(x + r * 2, cy - r * 1.5, x + r * 2, cy); g.lineTo(x + r * 2, VH + PAD); g.fill(); }
     g.globalCompositeOperation = 'source-over';
-    g.fillStyle = 'rgba(40,90,110,.18)'; for (let x = 30; x < w; x += 250) { g.fillRect(x - 6, 0, 3, VH); g.fillRect(x + 187, 0, 3, VH); }
+    g.fillStyle = pal.farLine; for (let x = 30; x < w; x += 250) { g.fillRect(x - 6, 0, 3, VH); g.fillRect(x + 187, 0, 3, VH); }
   }));
   // 中景：断柱、拱、吊链
-  LAYERS.push(layer(0.34, (g, w) => {
-    const R = rng(23);
+  layers.push(layer(W, 0.34, (g, w) => {
+    const R = rng(23 + seed);
     for (let x = 80; x < w; x += 170 + R() * 150) {
-      const top = 150 + R() * 260, cw = 34 + R() * 26; column(g, x, top, 660, cw, '#0e2636', 'rgba(60,130,150,.25)', R);
-      if (R() < .45) { const x2 = x + 150; g.strokeStyle = '#0e2636'; g.lineWidth = 22; g.beginPath(); g.arc(x + 75, top + 75, 75, Math.PI, Math.PI * 1.5 + R() * 1.2); g.stroke(); }
+      const top = 150 + R() * 260, cw = 34 + R() * 26; column(g, x, top, 660, cw, pal.mid, pal.midHi, R);
+      if (R() < .45) { g.strokeStyle = pal.mid; g.lineWidth = 22; g.beginPath(); g.arc(x + 75, top + 75, 75, Math.PI, Math.PI * 1.5 + R() * 1.2); g.stroke(); }
     }
     for (let x = 50; x < w; x += 120 + R() * 260) {   // 吊链与小灯
       const len = 60 + R() * 200; g.strokeStyle = 'rgba(30,70,90,.9)'; g.lineWidth = 2; g.setLineDash([5, 4]); g.beginPath(); g.moveTo(x, -PAD); g.lineTo(x, len); g.stroke(); g.setLineDash([]);
-      if (R() < .6) { glow(g, x, len + 6, 46, 'rgba(110,225,240,A)', .28); g.fillStyle = 'rgba(190,245,250,.75)'; g.beginPath(); g.arc(x, len + 6, 3.5, 0, 7); g.fill(); }
+      if (R() < .6) { glow(g, x, len + 6, 46, pal.glow, .28); g.fillStyle = 'rgba(190,245,250,.75)'; g.beginPath(); g.arc(x, len + 6, 3.5, 0, 7); g.fill(); }
     }
   }));
   // 近景：粗柱与碎石
-  LAYERS.push(layer(0.62, (g, w) => {
-    const R = rng(37);
+  layers.push(layer(W, 0.62, (g, w) => {
+    const R = rng(37 + seed);
     for (let x = 140; x < w; x += 330 + R() * 260) {
-      const cw = 64 + R() * 36, top = R() < .4 ? 120 + R() * 200 : -PAD; column(g, x, top, 640, cw, '#12303f', 'rgba(80,160,180,.28)', top > 0 ? R : null);
+      const cw = 64 + R() * 36, top = R() < .4 ? 120 + R() * 200 : -PAD; column(g, x, top, 640, cw, pal.near, pal.nearHi, top > 0 ? R : null);
       g.fillStyle = 'rgba(6,16,24,.5)'; for (let y = Math.max(top, 0) + 60; y < 600; y += 70 + R() * 40) g.fillRect(x - cw / 2, y, cw, 3);
     }
-    g.fillStyle = '#12303f'; for (let x = 0; x < w; x += 60 + R() * 200) { const rw = 30 + R() * 70, rh = 14 + R() * 30; g.beginPath(); g.moveTo(x, 640); g.lineTo(x + rw * .2, 640 - rh); g.lineTo(x + rw * .7, 640 - rh * .8); g.lineTo(x + rw, 640); g.fill(); }
+    g.fillStyle = pal.near; for (let x = 0; x < w; x += 60 + R() * 200) { const rw = 30 + R() * 70, rh = 14 + R() * 30; g.beginPath(); g.moveTo(x, 640); g.lineTo(x + rw * .2, 640 - rh); g.lineTo(x + rw * .7, 640 - rh * .8); g.lineTo(x + rw, 640); g.fill(); }
   }));
-}
-let TERRAIN, FORE, VIG;
-const TOFF = 120;
-function buildTerrain() {
-  TERRAIN = mk(WW + TOFF * 2, VH + PAD * 2); const g = TERRAIN.getContext('2d'); g.translate(TOFF, PAD); const R = rng(51);
-  const stone = (x, y, w, h, cap) => {
-    const gr = g.createLinearGradient(0, y, 0, y + Math.min(h, 220)); gr.addColorStop(0, '#1d4050'); gr.addColorStop(.25, '#122a38'); gr.addColorStop(1, '#060e15');
+
+  // 地形层
+  const terrain = mk(W + TOFF * 2, VH + PAD * 2), g = terrain.getContext('2d'); g.translate(TOFF, PAD);
+  const R = rng(51 + seed), X0 = -TOFF, X1 = W + TOFF, Y0 = -PAD, Y1 = VH + PAD;
+  const solidAt = (x, y, skip) => room.solids.some(s => s !== skip && x >= s.x && x < s.x + s.w && y >= s.y && y < s.y + s.h);
+  // 出口门洞：暗色通道，尽头有微光
+  for (const ex of room.exits) {
+    const inner = ex.side > 0 ? W - 70 : 70, outer = ex.side > 0 ? X1 : X0, x = Math.min(inner, outer), w = Math.abs(outer - inner);
+    g.fillStyle = '#02060a'; g.fillRect(x, ex.y, w, ex.h);
+    const gr = g.createLinearGradient(inner, 0, inner + ex.side * 70, 0); gr.addColorStop(0, 'rgba(130,230,245,0)'); gr.addColorStop(1, 'rgba(130,230,245,.36)');
+    g.fillStyle = gr; g.fillRect(x, ex.y, w, ex.h);
+  }
+  // 石块本体
+  for (const s of room.solids) {
+    const x = Math.max(s.x, X0), y = Math.max(s.y, Y0), w = Math.min(s.x + s.w, X1) - x, h = Math.min(s.y + s.h, Y1) - y;
+    if (w <= 0 || h <= 0) continue;
+    const gr = g.createLinearGradient(0, y, 0, y + 220); gr.addColorStop(0, '#1d4050'); gr.addColorStop(.25, '#122a38'); gr.addColorStop(1, '#060e15');
     g.fillStyle = gr; g.fillRect(x, y, w, h);
     g.save(); g.beginPath(); g.rect(x, y, w, h); g.clip();
     g.strokeStyle = 'rgba(120,200,220,.08)'; g.lineWidth = 1.5;
     for (let yy = y + 30, r = 0; yy < y + h; yy += 30, r++) { g.beginPath(); g.moveTo(x, yy); g.lineTo(x + w, yy); g.stroke(); for (let xx = x - (x % 64) + (r % 2) * 32 + (R() * 10 | 0); xx < x + w; xx += 64) { g.beginPath(); g.moveTo(xx, yy - 30); g.lineTo(xx, yy); g.stroke(); } }
     g.restore();
-    if (cap) { g.fillStyle = '#3f7c8c'; g.fillRect(x, y, w, 7); g.fillStyle = '#a6eaf2'; g.fillRect(x, y, w, 2.5); g.fillStyle = 'rgba(0,0,0,.35)'; g.fillRect(x, y + 7, w, 4); }
-  };
-  // 地面与墙
-  stone(-TOFF, GY, 1400 + TOFF, 400, true); stone(1550, GY, WW + TOFF - 1550, 400, true);
-  stone(-TOFF, -PAD, 40 + TOFF, GY + PAD, false); stone(3160, -PAD, TOFF + 40, GY + PAD, false);
-  g.fillStyle = '#3f7c8c'; g.fillRect(37, -PAD, 3, GY + PAD); g.fillRect(3160, -PAD, 3, GY + PAD);
-  // 石块
-  stone(960, 552, 84, 48, true);
-  // 坑壁高光与荆棘
-  g.fillStyle = '#3f7c8c'; g.fillRect(1397, GY, 3, 140); g.fillRect(1550, GY, 3, 140);
-  const hz = LEVEL.hazard;
-  const rg = g.createLinearGradient(0, 610, 0, 760); rg.addColorStop(0, 'rgba(255,60,90,0)'); rg.addColorStop(1, 'rgba(255,70,90,.55)'); g.fillStyle = rg; g.fillRect(hz.x, 610, hz.w, 150);
-  for (let i = 0; i < 13; i++) { const x = hz.x + 4 + i * 11.5, h = 44 + R() * 34, lean = (R() - .5) * 10; g.beginPath(); g.moveTo(x - 7, 730); g.lineTo(x + lean, 730 - h - 20); g.lineTo(x + 7, 730); g.closePath(); g.fillStyle = i % 2 ? '#f2d9d0' : '#d9a9a6'; g.fill(); g.strokeStyle = '#5a1626'; g.lineWidth = 1.5; g.stroke(); }
+  }
+  // 暴露在外的顶面加亮边，侧面加高光
+  const tops = [];
+  for (const s of room.solids) {
+    if (s.y > Y0) for (const [a, b] of runs1d(Math.max(s.x, X0), Math.min(s.x + s.w, X1), x => !solidAt(x, s.y - 2, s))) {
+      g.fillStyle = '#3f7c8c'; g.fillRect(a, s.y, b - a, 7); g.fillStyle = '#a6eaf2'; g.fillRect(a, s.y, b - a, 2.5); g.fillStyle = 'rgba(0,0,0,.35)'; g.fillRect(a, s.y + 7, b - a, 4);
+      tops.push([a, b, s.y]);
+    }
+    const ya = Math.max(s.y, Y0), yb = Math.min(s.y + s.h, Y1); g.fillStyle = '#3f7c8c';
+    for (const [a, b] of runs1d(ya, yb, y => !solidAt(s.x - 2, y, s))) g.fillRect(s.x, a, 3, b - a);
+    for (const [a, b] of runs1d(ya, yb, y => !solidAt(s.x + s.w + 1, y, s))) g.fillRect(s.x + s.w - 3, a, 3, b - a);
+  }
+  // 出口门楣上的符印
+  for (const ex of room.exits) {
+    const cx = ex.side > 0 ? W - 35 : 35, cy = ex.y - 26;
+    g.save(); g.fillStyle = '#bff6ff'; g.shadowColor = '#bff6ff'; g.shadowBlur = 10; g.globalAlpha = .75;
+    g.beginPath(); g.moveTo(cx, cy - 10); g.lineTo(cx + 7, cy); g.lineTo(cx, cy + 10); g.lineTo(cx - 7, cy); g.closePath(); g.fill(); g.restore();
+    g.fillStyle = '#5fb4c4'; g.fillRect(ex.side > 0 ? W - 70 : X0, ex.y - 3, 70 + TOFF, 3);
+  }
+  // 荆棘坑
+  for (const hz of room.hazards) {
+    const rg = g.createLinearGradient(0, hz.y - 42, 0, hz.y + 108); rg.addColorStop(0, 'rgba(255,60,90,0)'); rg.addColorStop(1, 'rgba(255,70,90,.55)'); g.fillStyle = rg; g.fillRect(hz.x, hz.y - 42, hz.w, 150);
+    const n = Math.floor((hz.w - 8) / 11.5) + 1, base = hz.y + 78;
+    for (let i = 0; i < n; i++) { const x = hz.x + 4 + i * 11.5, h = 44 + R() * 34, lean = (R() - .5) * 10; g.beginPath(); g.moveTo(x - 7, base); g.lineTo(x + lean, base - h - 20); g.lineTo(x + 7, base); g.closePath(); g.fillStyle = i % 2 ? '#f2d9d0' : '#d9a9a6'; g.fill(); g.strokeStyle = '#5a1626'; g.lineWidth = 1.5; g.stroke(); }
+  }
   // 单向平台
-  for (const o of LEVEL.oneways) {
+  for (const o of room.oneways) {
     g.fillStyle = '#0b1a24'; g.beginPath(); g.moveTo(o.x + 4, o.y + 8); g.lineTo(o.x + o.w - 4, o.y + 8); g.lineTo(o.x + o.w - 26, o.y + 34); g.lineTo(o.x + 26, o.y + 34); g.fill();
     const gr = g.createLinearGradient(0, o.y, 0, o.y + o.h); gr.addColorStop(0, '#2c5c6c'); gr.addColorStop(1, '#143140'); g.fillStyle = gr; rr(g, o.x, o.y, o.w, o.h, 3); g.fill();
     g.fillStyle = '#a6eaf2'; g.fillRect(o.x + 2, o.y, o.w - 4, 2.5); g.fillStyle = 'rgba(166,234,242,.25)'; for (let x = o.x + 14; x < o.x + o.w - 8; x += 22) g.fillRect(x, o.y + 6, 2, 7);
     g.strokeStyle = 'rgba(40,90,110,.9)'; g.lineWidth = 2; g.setLineDash([5, 4]); for (const cx of [o.x + 10, o.x + o.w - 10]) { g.beginPath(); g.moveTo(cx, -PAD); g.lineTo(cx, o.y); g.stroke(); } g.setLineDash([]);
   }
-  // 地表小草/苔
-  for (let i = 0; i < 260; i++) { const x = 44 + R() * (WW - 90); if (x > 1392 && x < 1558) continue; if (x > 955 && x < 1050) continue; const h = 4 + R() * 9; g.strokeStyle = `rgba(${120 + R() * 60 | 0},${215 + R() * 30 | 0},${225},${.35 + R() * .4})`; g.lineWidth = 1.3; g.beginPath(); g.moveTo(x, GY); g.quadraticCurveTo(x + (R() - .5) * 4, GY - h * .6, x + (R() - .5) * 8, GY - h); g.stroke(); }
+  // 地表小草/苔：只长在较宽的暴露顶面上
+  for (const [a, b, y] of tops) {
+    if (b - a < 130) continue;
+    for (let i = 0, n = (b - a) * 0.085 | 0; i < n; i++) { const x = a + 4 + R() * (b - a - 8), h = 4 + R() * 9; g.strokeStyle = `rgba(${120 + R() * 60 | 0},${215 + R() * 30 | 0},${225},${.35 + R() * .4})`; g.lineWidth = 1.3; g.beginPath(); g.moveTo(x, y); g.quadraticCurveTo(x + (R() - .5) * 4, y - h * .6, x + (R() - .5) * 8, y - h); g.stroke(); }
+  }
   // 灯柱
-  for (const x of LEVEL.lanterns) { g.fillStyle = '#0c1c27'; g.fillRect(x - 3, GY - 118, 6, 118); g.fillRect(x - 10, GY - 8, 20, 8); g.strokeStyle = '#0c1c27'; g.lineWidth = 4; g.beginPath(); g.arc(x + 12, GY - 118, 12, Math.PI, Math.PI * 1.9); g.stroke(); g.fillStyle = '#17323f'; rr(g, x + 15, GY - 124, 14, 20, 4); g.fill(); }
-  // 出口拱门石框
-  const d = LEVEL.door, cx = d.x + d.w / 2;
-  g.fillStyle = '#0d202c'; g.beginPath(); g.moveTo(cx - 62, GY); g.lineTo(cx - 62, d.y + 30); g.quadraticCurveTo(cx - 62, d.y - 50, cx, d.y - 62); g.quadraticCurveTo(cx + 62, d.y - 50, cx + 62, d.y + 30); g.lineTo(cx + 62, GY); g.fill();
-  g.strokeStyle = '#5fb4c4'; g.lineWidth = 3; g.stroke();
-  g.strokeStyle = 'rgba(95,180,196,.35)'; g.lineWidth = 1.5; for (let i = 0; i < 7; i++) { const a = Math.PI + i * Math.PI / 6; g.beginPath(); g.moveTo(cx + Math.cos(a) * 44, d.y + 20 + Math.sin(a) * 52); g.lineTo(cx + Math.cos(a) * 60, d.y + 22 + Math.sin(a) * 76); g.stroke(); }
+  for (const l of room.lanterns) { const x = l.x, y = l.y; g.fillStyle = '#0c1c27'; g.fillRect(x - 3, y - 118, 6, 118); g.fillRect(x - 10, y - 8, 20, 8); g.strokeStyle = '#0c1c27'; g.lineWidth = 4; g.beginPath(); g.arc(x + 12, y - 118, 12, Math.PI, Math.PI * 1.9); g.stroke(); g.fillStyle = '#17323f'; rr(g, x + 15, y - 124, 14, 20, 4); g.fill(); }
+  // 最终出口的拱门石框
+  if (room.door) {
+    const d = room.door, cx = d.x + d.w / 2, by = d.y + d.h;
+    g.fillStyle = '#0d202c'; g.beginPath(); g.moveTo(cx - 62, by); g.lineTo(cx - 62, d.y + 30); g.quadraticCurveTo(cx - 62, d.y - 50, cx, d.y - 62); g.quadraticCurveTo(cx + 62, d.y - 50, cx + 62, d.y + 30); g.lineTo(cx + 62, by); g.fill();
+    g.strokeStyle = '#5fb4c4'; g.lineWidth = 3; g.stroke();
+    g.strokeStyle = 'rgba(95,180,196,.35)'; g.lineWidth = 1.5; for (let i = 0; i < 7; i++) { const a = Math.PI + i * Math.PI / 6; g.beginPath(); g.moveTo(cx + Math.cos(a) * 44, d.y + 20 + Math.sin(a) * 52); g.lineTo(cx + Math.cos(a) * 60, d.y + 22 + Math.sin(a) * 76); g.stroke(); }
+  }
   // 木桩底座
-  g.fillStyle = '#0c1c27'; g.fillRect(LEVEL.dummy.x - 16, GY - 6, 32, 6);
+  if (room.dummy) { g.fillStyle = '#0c1c27'; g.fillRect(room.dummy.x - 16, room.dummy.y - 6, 32, 6); }
 
   // 前景：钟乳石与暗角碎石（不遮挡可玩区域中段）
-  FORE = layer(1.25, (g2, w) => {
-    const R2 = rng(77); g2.fillStyle = '#03080d';
+  const fore = layer(W, 1.25, (g2, w) => {
+    const R2 = rng(77 + seed); g2.fillStyle = '#03080d';
     for (let x = -20; x < w; x += 70 + R2() * 240) { const sw = 30 + R2() * 70, sh = 40 + R2() * 110; g2.beginPath(); g2.moveTo(x, -PAD); g2.lineTo(x + sw * .5 + (R2() - .5) * 10, sh); g2.lineTo(x + sw, -PAD); g2.fill(); }
     for (let x = 0; x < w; x += 260 + R2() * 520) { const rw = 90 + R2() * 120, rh = 22 + R2() * 26; g2.beginPath(); g2.moveTo(x, VH + PAD); g2.lineTo(x + rw * .25, VH - rh); g2.lineTo(x + rw * .6, VH - rh * .7); g2.lineTo(x + rw, VH + PAD); g2.fill(); }
   });
-  VIG = mk(VW, VH); const v = VIG.getContext('2d'); const vg = v.createRadialGradient(VW / 2, VH / 2, 260, VW / 2, VH / 2, 780); vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(0,4,8,.78)'); v.fillStyle = vg; v.fillRect(0, 0, VW, VH);
+  return { layers, terrain, fore };
 }
+const GFX = {};
+const roomGfx = room => GFX[room.id] || (GFX[room.id] = buildRoomGfx(room));
+let VIG;
+function buildVignette() { VIG = mk(VW, VH); const v = VIG.getContext('2d'); const vg = v.createRadialGradient(VW / 2, VH / 2, 260, VW / 2, VH / 2, 780); vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(0,4,8,.78)'); v.fillStyle = vg; v.fillRect(0, 0, VW, VH); }
 const MOTES = (() => { const R = rng(99), a = []; for (let i = 0; i < 90; i++) a.push({ x: R() * 1600, y: R() * VH, z: .5 + R() * .9, ph: R() * 6.28, s: 1 + R() * 2.2 }); return a; })();
 
 function drawPlayer(g, p, t, ghostA) {
@@ -844,26 +1066,66 @@ function drawGuard(g, e, t) {
   }
 }
 
-function drawDoor(g, t) {
-  const d = LEVEL.door, o = G.door.openT, cx = d.x + d.w / 2;
+function drawCrawler(g, e, t) {
+  const c = CONFIG.crawler, flash = e.flashT > 0, K = flash ? () => '#fff4e6' : col => col;
+  let alpha = 1, squash = 1;
+  if (e.state === 'dead') { const k = clamp(e.deadT / c.deathTime, 0, 1); alpha = 1 - k; squash = 1 - k * .5; }
+  g.save(); g.translate(e.x, e.y); g.globalAlpha = alpha; g.scale(e.facing, squash);
+  g.lineJoin = 'round'; g.lineCap = 'round';
+  g.strokeStyle = K('#0a0c14'); g.lineWidth = 3;
+  for (let i = 0; i < 3; i++) { const lx = -13 + i * 12, sw = Math.sin(e.walkPhase + i * 2.1) * 3; g.beginPath(); g.moveTo(lx, -7); g.lineTo(lx + sw, 0); g.stroke(); }
+  const gr = g.createLinearGradient(0, -28, 0, -4); gr.addColorStop(0, '#8a5a3c'); gr.addColorStop(1, '#3a2218');
+  g.beginPath(); g.moveTo(-22, -6); g.bezierCurveTo(-22, -24, -4, -30, 8, -26); g.bezierCurveTo(18, -23, 22, -14, 22, -6); g.closePath();
+  g.fillStyle = flash ? '#fff4e6' : gr; g.fill(); g.strokeStyle = K('#120a08'); g.lineWidth = 2; g.stroke();
+  g.strokeStyle = K('rgba(255,190,130,.45)'); g.lineWidth = 1.5; g.beginPath(); g.moveTo(-10, -22); g.quadraticCurveTo(-6, -14, -8, -7); g.moveTo(2, -26); g.quadraticCurveTo(6, -16, 4, -7); g.stroke();
+  g.fillStyle = K('#1c1210'); g.beginPath(); g.ellipse(19, -9, 7, 6, 0, 0, 7); g.fill();
+  if (e.state !== 'dead') { g.save(); g.shadowColor = '#ff7a2a'; g.shadowBlur = 8; g.fillStyle = '#ffb060'; g.beginPath(); g.arc(22, -10, 2, 0, 7); g.fill(); g.restore(); }
+  g.restore();
+}
+
+function drawCheckpoint(g, cp, t) {   // 烬灯台：未点燃只有一点余烬，点燃后有火焰和暖光
+  const lit = !!G.prog.lit[cp.id], x = cp.x, y = cp.y, f = .85 + Math.sin(t * 9) * .08 + Math.sin(t * 23) * .05;
+  g.save(); g.lineJoin = 'round';
+  g.fillStyle = '#0d202c'; g.strokeStyle = '#5fb4c4'; g.lineWidth = 2;
+  g.beginPath(); g.moveTo(x - 22, y); g.lineTo(x - 12, y - 40); g.lineTo(x + 12, y - 40); g.lineTo(x + 22, y); g.closePath(); g.fill(); g.stroke();
+  g.fillStyle = '#17323f'; g.beginPath(); g.moveTo(x - 27, y - 56); g.quadraticCurveTo(x, y - 24, x + 27, y - 56); g.closePath(); g.fill(); g.stroke();
+  if (lit) {
+    g.globalCompositeOperation = 'lighter';
+    glow(g, x, y - 72, 220, 'rgba(255,180,100,A)', .2 * f + G.cpPulse * .3); glow(g, x, y - 68, 36, 'rgba(255,235,190,A)', .8 * f);
+    g.globalCompositeOperation = 'source-over';
+    const fh = 28 + Math.sin(t * 11) * 3, sway = Math.sin(t * 7) * 3;
+    g.fillStyle = '#ffb968'; g.beginPath(); g.moveTo(x - 10, y - 56); g.quadraticCurveTo(x - 12, y - 56 - fh * .5, x + sway, y - 56 - fh); g.quadraticCurveTo(x + 12, y - 56 - fh * .5, x + 10, y - 56); g.closePath(); g.fill();
+    g.fillStyle = '#fff3d6'; g.beginPath(); g.moveTo(x - 5, y - 56); g.quadraticCurveTo(x - 6, y - 56 - fh * .3, x + sway * .5, y - 56 - fh * .6); g.quadraticCurveTo(x + 6, y - 56 - fh * .3, x + 5, y - 56); g.closePath(); g.fill();
+  } else {
+    g.fillStyle = `rgba(255,150,80,${.4 + Math.sin(t * 2.2) * .15})`; g.beginPath(); g.arc(x, y - 58, 2.6, 0, 7); g.fill();
+  }
+  if (G.mode === 'play' && nearCheckpoint()) {
+    g.fillStyle = 'rgba(255,233,196,.92)'; g.font = '16px Georgia, "Microsoft YaHei", serif'; g.textAlign = 'center';
+    g.fillText(lit ? 'E / ↑ 休息' : 'E / ↑ 点燃烬灯台', x, y - 116);
+  }
+  g.restore();
+}
+
+function drawDoor(g, d, t) {
+  const o = G.door.openT, cx = d.x + d.w / 2, by = d.y + d.h;
   g.save();
-  g.beginPath(); g.moveTo(d.x, GY); g.lineTo(d.x, d.y + 26); g.quadraticCurveTo(d.x, d.y - 26, cx, d.y - 34); g.quadraticCurveTo(d.x + d.w, d.y - 26, d.x + d.w, d.y + 26); g.lineTo(d.x + d.w, GY); g.closePath();
+  g.beginPath(); g.moveTo(d.x, by); g.lineTo(d.x, d.y + 26); g.quadraticCurveTo(d.x, d.y - 26, cx, d.y - 34); g.quadraticCurveTo(d.x + d.w, d.y - 26, d.x + d.w, d.y + 26); g.lineTo(d.x + d.w, by); g.closePath();
   g.fillStyle = '#02060a'; g.fill(); g.clip();
-  if (o > 0) { const gr = g.createLinearGradient(0, d.y - 34, 0, GY); gr.addColorStop(0, `rgba(190,250,255,${o * .95})`); gr.addColorStop(1, `rgba(90,210,230,${o * .75})`); g.fillStyle = gr; g.fillRect(d.x, d.y - 40, d.w, 180); }
+  if (o > 0) { const gr = g.createLinearGradient(0, d.y - 34, 0, by); gr.addColorStop(0, `rgba(190,250,255,${o * .95})`); gr.addColorStop(1, `rgba(90,210,230,${o * .75})`); g.fillStyle = gr; g.fillRect(d.x, d.y - 40, d.w, 180); }
   // 栅栏（解锁后上升）
   const lift = o * 170; g.strokeStyle = '#4c6f7c'; g.lineWidth = 5;
-  for (let i = 0; i < 5; i++) { const x = d.x + 8 + i * 15; g.beginPath(); g.moveTo(x, d.y - 40 - lift); g.lineTo(x, GY - lift); g.stroke(); }
+  for (let i = 0; i < 5; i++) { const x = d.x + 8 + i * 15; g.beginPath(); g.moveTo(x, d.y - 40 - lift); g.lineTo(x, by - lift); g.stroke(); }
   g.lineWidth = 4; g.beginPath(); g.moveTo(d.x, d.y + 40 - lift); g.lineTo(d.x + d.w, d.y + 40 - lift); g.moveTo(d.x, d.y + 95 - lift); g.lineTo(d.x + d.w, d.y + 95 - lift); g.stroke();
   g.restore();
   // 拱顶符印：锁定为暗红，解锁为青白
   g.save(); const col = G.door.unlocked ? '#bff6ff' : '#ff6a5a'; g.shadowColor = col; g.shadowBlur = 12; g.fillStyle = col; g.globalAlpha = .7 + Math.sin(t * 3) * .2;
   g.beginPath(); g.moveTo(cx, d.y - 58); g.lineTo(cx + 7, d.y - 48); g.lineTo(cx, d.y - 38); g.lineTo(cx - 7, d.y - 48); g.closePath(); g.fill(); g.restore();
-  if (o > 0) { g.save(); g.globalCompositeOperation = 'lighter'; glow(g, cx, GY - 60, 220, 'rgba(120,230,245,A)', o * (.3 + Math.sin(t * 2.5) * .05)); g.restore(); }
+  if (o > 0) { g.save(); g.globalCompositeOperation = 'lighter'; glow(g, cx, by - 60, 220, 'rgba(120,230,245,A)', o * (.3 + Math.sin(t * 2.5) * .05)); g.restore(); }
 }
 
-function drawDummy(g) {
-  const d = LEVEL.dummy, w = G.dummy.wob * 0.05;
-  g.save(); g.translate(d.x, GY - 4); g.rotate(w);
+function drawDummy(g, d) {
+  const w = G.dummy.wob * 0.05;
+  g.save(); g.translate(d.x, d.y - 4); g.rotate(w);
   g.fillStyle = '#3b3020'; g.fillRect(-4, -62, 8, 62);
   g.fillStyle = '#6d5a3a'; rr(g, -14, -70, 28, 34, 8); g.fill(); g.strokeStyle = '#1a140c'; g.lineWidth = 2; g.stroke();
   g.strokeStyle = '#c9b68a'; g.lineWidth = 2; g.beginPath(); g.moveTo(-8, -60); g.lineTo(8, -46); g.moveTo(8, -60); g.lineTo(-8, -46); g.stroke();
@@ -885,62 +1147,84 @@ function drawHUD(g, t) {
   const k = 1 - p.dashCd / c.dashCooldown; g.fillStyle = 'rgba(8,20,28,.7)'; rr(g, 32, 70, 92, 6, 3); g.fill();
   g.fillStyle = k >= 1 ? '#8eeaf5' : '#3d7f8c'; rr(g, 32, 70, Math.max(6, 92 * k), 6, 3); g.fill();
   g.fillStyle = 'rgba(190,225,232,.7)'; g.font = '13px Georgia, "Microsoft YaHei", serif'; g.textAlign = 'left'; g.fillText('冲刺', 132, 77);
+  // 检查点状态
+  g.fillStyle = G.prog.checkpoint ? 'rgba(255,201,120,.85)' : 'rgba(190,225,232,.4)'; g.fillText(G.prog.checkpoint ? '烬灯台已点燃' : '烬灯台未点燃', 32, 100);
   g.textAlign = 'center'; g.fillStyle = 'rgba(190,225,232,.55)'; g.font = '14px Consolas, monospace'; g.fillText(G.runTime.toFixed(1) + 's', VW / 2, 34);
-  if (G.door.unlocked && G.mode === 'play') { g.fillStyle = `rgba(200,248,255,${.6 + Math.sin(t * 4) * .25})`; g.font = '18px Georgia, "Microsoft YaHei", serif'; g.fillText('拱门已开启 →', VW / 2, 64); }
+  if (G.door.unlocked && G.mode === 'play') { g.fillStyle = `rgba(200,248,255,${.6 + Math.sin(t * 4) * .25})`; g.font = '18px Georgia, "Microsoft YaHei", serif'; g.fillText(G.room.door ? '拱门已开启 →' : '守卫厅的拱门已开启', VW / 2, 64); }
+  // 进入房间时显示房间名
+  const nt = CONFIG.room.nameTime;
+  if (G.mode === 'play' && G.roomT < nt) {
+    const a = clamp(Math.min(G.roomT / .4, (nt - G.roomT) / .8), 0, 1);
+    g.fillStyle = `rgba(241,231,208,${a * .9})`; g.font = '28px Georgia, "Microsoft YaHei", serif'; g.fillText(G.room.name, VW / 2, 124);
+    g.fillStyle = `rgba(130,220,235,${a * .5})`; g.fillRect(VW / 2 - 70, 138, 140, 1);
+  }
 }
 
 function drawDebug(g) {
-  const p = G.player, e = G.guard, cam = G.cam;
+  const p = G.player, cam = G.cam, room = G.room;
   g.save(); g.translate(-cam.x, 0); g.lineWidth = 1.5;
   const box = (b, col) => { g.strokeStyle = col; g.strokeRect(b.x + .5, b.y + .5, b.w, b.h); };
-  for (const s of LEVEL.solids) box(s, 'rgba(120,255,160,.8)');
-  for (const o of LEVEL.oneways) box(o, 'rgba(120,200,255,.9)');
-  box(LEVEL.hazard, 'rgba(255,60,90,.95)'); box(LEVEL.door, 'rgba(255,255,255,.9)'); box(dummyBox(), 'rgba(200,200,120,.9)');
+  for (const s of room.solids) box(s, 'rgba(120,255,160,.8)');
+  for (const o of room.oneways) box(o, 'rgba(120,200,255,.9)');
+  for (const hz of room.hazards) box(hz, 'rgba(255,60,90,.95)');
+  for (const ex of room.exits) box(ex, 'rgba(255,160,255,.95)');
+  if (room.door) box(room.door, 'rgba(255,255,255,.9)');
+  if (room.dummy) box(dummyBox(), 'rgba(200,200,120,.9)');
+  if (room.checkpoint) { const cp = room.checkpoint, r = CONFIG.checkpoint.reach; box({ x: cp.x - r, y: cp.y - 60, w: r * 2, h: 60 }, 'rgba(255,200,120,.9)'); }
+  g.fillStyle = '#ff5ad0'; g.fillRect(p.safe.x - 3, p.safe.y - 3, 6, 6);
   box(pBox(p), '#3dff7a'); box(pHurt(p), '#ffe84a');
   if (p.atkT >= 0) { const ph = atkPhase(p); g.fillStyle = ph === 'active' ? 'rgba(255,40,40,.45)' : 'rgba(255,160,40,.15)'; const b = pAtkBox(p); g.fillRect(b.x, b.y, b.w, b.h); box(b, '#ff4040'); }
-  if (e.state !== 'dead') { box(gHurt(e), '#ffe84a'); if (e.state === 'windup' || e.state === 'swing') { const b = gAtkBox(e); g.fillStyle = e.state === 'swing' ? 'rgba(255,40,40,.45)' : 'rgba(255,160,40,.15)'; g.fillRect(b.x, b.y, b.w, b.h); box(b, '#ff4040'); } }
+  for (const e of G.enemies) {
+    if (e.state === 'dead') continue;
+    if (e.type === 'crawler') { box(cHurt(e), '#ffe84a'); continue; }
+    box(gHurt(e), '#ffe84a');
+    if (e.state === 'windup' || e.state === 'swing') { const b = gAtkBox(e); g.fillStyle = e.state === 'swing' ? 'rgba(255,40,40,.45)' : 'rgba(255,160,40,.15)'; g.fillRect(b.x, b.y, b.w, b.h); box(b, '#ff4040'); }
+  }
   g.restore();
+  const e = G.enemies.find(x => x.type === 'guard'), cp = G.prog.checkpoint;
   const lines = [
-    `mode ${G.mode}  t ${G.runTime.toFixed(2)}  steps ${G.steps}  hitStop ${Math.max(0, G.hitStop).toFixed(3)}  cam ${cam.x.toFixed(0)}`,
-    `player ${p.state}  pos ${p.x.toFixed(1)},${p.y.toFixed(1)}  vel ${p.vx.toFixed(0)},${p.vy.toFixed(0)}  face ${p.facing}  ground ${p.onGround}`,
-    `hp ${p.hp}/${CONFIG.player.maxHp}  inv ${p.invT.toFixed(2)}  dashCd ${p.dashCd.toFixed(2)}  coyote ${Math.max(0, p.coyoteT).toFixed(2)}  jbuf ${Math.max(0, p.jumpBufT).toFixed(2)}`,
-    `guard ${e.state}  t ${e.t.toFixed(2)}  hp ${e.hp}/${CONFIG.guard.hp}  x ${e.x.toFixed(0)}  face ${e.facing}  door ${G.door.unlocked ? 'open ' + G.door.openT.toFixed(2) : 'locked'}`,
-    `renderer Canvas 2D  parts ${G.parts.length}  audio ${Audio.ac ? Audio.ac.state : 'none'}${Audio.muted ? ' (muted)' : ''}`,
+    `mode ${G.mode}  room ${G.roomId}${G.trans ? ' (' + G.trans.phase + ')' : ''}  t ${G.runTime.toFixed(2)}  steps ${G.steps}  hitStop ${Math.max(0, G.hitStop).toFixed(3)}  cam ${cam.x.toFixed(0)}`,
+    `player ${p.state}  pos ${p.x.toFixed(1)},${p.y.toFixed(1)}  vel ${p.vx.toFixed(0)},${p.vy.toFixed(0)}  face ${p.facing}  ground ${p.onGround ? p.groundKind : '-'}  safe ${p.safe.x.toFixed(0)},${p.safe.y.toFixed(0)}`,
+    `hp ${p.hp}/${CONFIG.player.maxHp}  inv ${p.invT.toFixed(2)}  dashCd ${p.dashCd.toFixed(2)}  coyote ${Math.max(0, p.coyoteT).toFixed(2)}  jbuf ${Math.max(0, p.jumpBufT).toFixed(2)}  keys ${[...heldCodes].join('+') || '-'}`,
+    `checkpoint ${cp ? cp.room + '/' + cp.id : 'none'}  deaths ${G.stats.deaths}  rooms ${G.stats.roomChanges}  enemies ${G.enemies.map(x => x.id + ':' + x.state + ':' + x.hp).join(' ') || '-'}`,
+    `guard ${e ? e.state + '  t ' + e.t.toFixed(2) + '  hp ' + e.hp + '/' + CONFIG.guard.hp + '  x ' + e.x.toFixed(0) : G.prog.guardDefeated ? 'defeated' : 'not in this room'}  door ${G.door.unlocked ? 'open ' + G.door.openT.toFixed(2) : 'locked'}`,
+    `renderer Canvas 2D  parts ${G.parts.length}  gfx ${Object.keys(GFX).length} rooms  audio ${Audio.ac ? Audio.ac.state : 'none'}${Audio.muted ? ' (muted)' : ''}`,
   ];
-  g.fillStyle = 'rgba(0,0,0,.6)'; g.fillRect(8, VH - 14 - lines.length * 17, 640, lines.length * 17 + 8);
+  g.fillStyle = 'rgba(0,0,0,.6)'; g.fillRect(8, VH - 14 - lines.length * 17, 760, lines.length * 17 + 8);
   g.fillStyle = '#b8ffcf'; g.font = '13px Consolas, monospace'; g.textAlign = 'left';
   lines.forEach((l, i) => g.fillText(l, 14, VH - 4 - (lines.length - i) * 17 + 12));
 }
 
 function render() {
-  const g = ctx, t = G.time, cam = G.cam, p = G.player;
+  const g = ctx, t = G.time, cam = G.cam, p = G.player, room = G.room, pal = room.pal, gfx = roomGfx(room);
   let shx = 0, shy = 0;
   if (G.shakeOn && G.shakeT > 0) { const a = G.shakeAmp * (G.shakeT / CONFIG.fx.shakeTime); shx = (Math.random() - .5) * 2 * a; shy = (Math.random() - .5) * 2 * a; } else if (G.shakeT <= 0) G.shakeAmp = 0;
   const cx = cam.x;
   // 天空
-  const sky = g.createLinearGradient(0, 0, 0, VH); sky.addColorStop(0, '#0d2a3a'); sky.addColorStop(.55, '#143f50'); sky.addColorStop(1, '#0a1c28'); g.fillStyle = sky; g.fillRect(0, 0, VW, VH);
-  glow(g, VW * .5 - cx * .05 + 100, 180, 520, 'rgba(90,200,220,A)', .22);
-  for (const L of LAYERS) g.drawImage(L.c, Math.round(-cx * L.factor - PAD + shx * L.factor), Math.round(-PAD + shy * L.factor));
+  const sky = g.createLinearGradient(0, 0, 0, VH); sky.addColorStop(0, pal.sky[0]); sky.addColorStop(.55, pal.sky[1]); sky.addColorStop(1, pal.sky[2]); g.fillStyle = sky; g.fillRect(0, 0, VW, VH);
+  glow(g, VW * .5 - cx * .05 + 100, 180, 520, pal.glow, .22);
+  for (const L of gfx.layers) g.drawImage(L.c, Math.round(-cx * L.factor - PAD + shx * L.factor), Math.round(-PAD + shy * L.factor));
   // 光束
   g.save(); g.globalCompositeOperation = 'lighter';
-  for (let i = 0; i < 5; i++) { const x = ((i * 430 + 120) - cx * .28) % 2100; const a = .035 + Math.sin(t * .5 + i) * .012; g.fillStyle = `rgba(120,220,240,${a})`; g.beginPath(); g.moveTo(x, 0); g.lineTo(x + 90, 0); g.lineTo(x - 130, VH); g.lineTo(x - 300, VH); g.fill(); }
-  const fog = g.createLinearGradient(0, 400, 0, 620); fog.addColorStop(0, 'rgba(70,160,180,0)'); fog.addColorStop(1, 'rgba(70,160,180,.13)'); g.fillStyle = fog; g.fillRect(0, 400, VW, 220);
+  for (let i = 0; i < 5; i++) { const x = ((i * 430 + 120) - cx * .28) % 2100; const a = .035 + Math.sin(t * .5 + i) * .012; g.fillStyle = `rgba(${pal.beam},${a})`; g.beginPath(); g.moveTo(x, 0); g.lineTo(x + 90, 0); g.lineTo(x - 130, VH); g.lineTo(x - 300, VH); g.fill(); }
+  const fog = g.createLinearGradient(0, 400, 0, 620); fog.addColorStop(0, `rgba(${pal.fog},0)`); fog.addColorStop(1, `rgba(${pal.fog},.13)`); g.fillStyle = fog; g.fillRect(0, 400, VW, 220);
   g.restore();
   // 世界层
   g.save(); g.translate(Math.round(-cx + shx), Math.round(shy));
-  g.drawImage(TERRAIN, -TOFF, -PAD);
-  drawDoor(g, t);
+  g.drawImage(gfx.terrain, -TOFF, -PAD);
+  if (room.door) drawDoor(g, room.door, t);
   // 刻字提示
   g.textAlign = 'center'; g.font = '17px Georgia, "Microsoft YaHei", serif';
-  for (const h of LEVEL.hints) { if (h.x < cx - 300 || h.x > cx + VW + 300) continue; g.fillStyle = 'rgba(175,230,238,.42)'; g.fillText(h.t, h.x, h.y); g.fillStyle = 'rgba(175,230,238,.18)'; g.fillRect(h.x - 30, h.y + 9, 60, 1); }
+  for (const h of room.hints) { if (h.x < cx - 300 || h.x > cx + VW + 300) continue; g.fillStyle = 'rgba(175,230,238,.42)'; g.fillText(h.t, h.x, h.y); g.fillStyle = 'rgba(175,230,238,.18)'; g.fillRect(h.x - 30, h.y + 9, 60, 1); }
   // 灯
   g.save(); g.globalCompositeOperation = 'lighter';
-  for (const x of LEVEL.lanterns) { if (x < cx - 300 || x > cx + VW + 300) continue; const f = .85 + Math.sin(t * 5 + x) * .06 + Math.sin(t * 13 + x * 2) * .03; glow(g, x + 22, GY - 114, 190, 'rgba(110,220,240,A)', .26 * f); glow(g, x + 22, GY - 114, 26, 'rgba(220,250,255,A)', .9 * f); }
-  glow(g, LEVEL.hazard.mid, 700, 150, 'rgba(255,70,90,A)', .22 + Math.sin(t * 3) * .05);
+  for (const l of room.lanterns) { const x = l.x; if (x < cx - 300 || x > cx + VW + 300) continue; const f = .85 + Math.sin(t * 5 + x) * .06 + Math.sin(t * 13 + x * 2) * .03; glow(g, x + 22, l.y - 114, 190, 'rgba(110,220,240,A)', .26 * f); glow(g, x + 22, l.y - 114, 26, 'rgba(220,250,255,A)', .9 * f); }
+  for (const hz of room.hazards) glow(g, hz.x + hz.w / 2, hz.y + 48, Math.max(150, hz.w * .7), 'rgba(255,70,90,A)', .22 + Math.sin(t * 3) * .05);
   if (!p.dead) glow(g, p.x, p.y - 28, 120, 'rgba(150,225,240,A)', .13);
   g.restore();
-  drawDummy(g);
-  drawGuard(g, G.guard, t);
+  if (room.checkpoint) drawCheckpoint(g, room.checkpoint, t);
+  if (room.dummy) drawDummy(g, room.dummy);
+  for (const e of G.enemies) (e.type === 'guard' ? drawGuard : drawCrawler)(g, e, t);
   for (const gh of G.ghosts) drawPlayer(g, Object.assign({}, p, { x: gh.x, y: gh.y, facing: gh.facing, atkT: -1 }), t, gh.life / 0.22 * 0.35);
   drawPlayer(g, p, t);
   // 粒子
@@ -951,9 +1235,12 @@ function render() {
   g.save(); g.globalCompositeOperation = 'lighter';
   for (const m of MOTES) { const x = (((m.x - cx * m.z + Math.sin(t * .3 + m.ph) * 30) % 1600) + 1600) % 1600 - 160, y = (((m.y - t * 8 * m.z + Math.sin(t * .5 + m.ph) * 12) % VH) + VH) % VH; g.fillStyle = `rgba(170,235,245,${(.14 + .14 * Math.sin(t * 1.5 + m.ph)) * m.z})`; g.beginPath(); g.arc(x, y, m.s * m.z, 0, 7); g.fill(); }
   g.restore();
-  g.drawImage(FORE.c, Math.round(-cx * FORE.factor - PAD + shx), Math.round(-PAD + shy));
+  g.drawImage(gfx.fore.c, Math.round(-cx * gfx.fore.factor - PAD + shx), Math.round(-PAD + shy));
   g.drawImage(VIG, 0, 0);
-  if (G.fade > 0) { g.fillStyle = `rgba(2,6,10,${G.fade * .85})`; g.fillRect(0, 0, VW, VH); }
+  // 黑场：荆棘重置的闪黑，以及房间切换的淡出/淡入
+  let dark = G.fade * .85;
+  if (G.trans) dark = Math.max(dark, G.trans.phase === 'out' ? clamp(G.trans.t / CONFIG.room.fadeOut, 0, 1) : 1 - clamp(G.trans.t / CONFIG.room.fadeIn, 0, 1));
+  if (dark > 0) { g.fillStyle = `rgba(2,6,10,${dark})`; g.fillRect(0, 0, VW, VH); }
   if (p.flashT > 0 && !p.dead) { g.fillStyle = `rgba(255,90,90,${p.flashT * 1.2})`; g.fillRect(0, 0, VW, VH); }
   if (G.mode !== 'title') drawHUD(g, t);
   if (G.debug) drawDebug(g);
@@ -983,23 +1270,31 @@ window.addEventListener('resize', resize);
 /* ---------------- 只读调试接口 ---------------- */
 window.__dbg = {
   state() {
-    const p = G.player, e = G.guard;
+    const p = G.player, e = G.enemies.find(x => x.type === 'guard'), gd = G.prog.guardDefeated;
     return JSON.parse(JSON.stringify({
       mode: G.mode, runTime: G.runTime, steps: G.steps, hitStop: Math.max(0, G.hitStop), debug: G.debug, shakeOn: G.shakeOn, camX: G.cam.x,
-      player: { x: p.x, y: p.y, vx: p.vx, vy: p.vy, facing: p.facing, onGround: p.onGround, hp: p.hp, invT: p.invT, hurtT: p.hurtT, dashT: Math.max(0, p.dashT), dashCd: p.dashCd, atk: atkPhase(p), state: p.state, dead: p.dead },
-      guard: { x: e.x, state: e.state, t: e.t, hp: e.hp, facing: e.facing, swings: e.swings },
-      door: G.door, stats: G.stats, input: inp,
+      room: G.roomId, roomW: G.room.w, roomT: G.roomT, trans: G.trans ? G.trans.phase : null,
+      player: { x: p.x, y: p.y, vx: p.vx, vy: p.vy, facing: p.facing, onGround: p.onGround, groundKind: p.groundKind, hp: p.hp, invT: p.invT, hurtT: p.hurtT, dashT: Math.max(0, p.dashT), dashCd: p.dashCd, atk: atkPhase(p), state: p.state, dead: p.dead, safe: p.safe },
+      // guard：守卫不在当前房间时 present=false；已击败时 state 为 'dead'
+      guard: e ? { present: true, x: e.x, state: e.state, t: e.t, hp: e.hp, facing: e.facing, swings: e.swings }
+               : { present: false, x: null, state: gd ? 'dead' : 'absent', t: 0, hp: gd ? 0 : CONFIG.guard.hp, facing: 0, swings: 0 },
+      enemies: G.enemies.map(x => ({ id: x.id, type: x.type, x: x.x, y: x.y, state: x.state, hp: x.hp, facing: x.facing })),
+      progress: { checkpoint: G.prog.checkpoint, lit: Object.keys(G.prog.lit), guardDefeated: gd, visited: Object.keys(G.prog.visited) },
+      nearCheckpoint: nearCheckpoint(),
+      door: G.door, stats: G.stats, input: inp, heldKeys: [...heldCodes],
       audio: { ctx: Audio.ac ? Audio.ac.state : 'none', sampleRate: Audio.ac ? Audio.ac.sampleRate : null, muted: Audio.muted, error: Audio.error, played: Audio.played },
-      renderer: 'Canvas 2D',
+      renderer: 'Canvas 2D', gfx: { rooms: Object.keys(GFX).length, parts: G.parts.length, ghosts: G.ghosts.length },
     }));
   },
   config: () => JSON.parse(JSON.stringify(CONFIG)),
+  rooms: () => JSON.parse(JSON.stringify({ start: START, rooms: ROOMS }, (k, v) => k === 'pal' ? undefined : v)),
   audioSelfTest,
 };
 // 状态注入接口：仅在 URL 带 ?test=1 时存在，仅供明确标注的测试使用
-if (/[?&]test=1/.test(location.search)) window.__test = { G, CONFIG, LEVEL, hurtPlayer, setMode, resetGame, step };
+if (/[?&]test=1/.test(location.search)) window.__test = { G, CONFIG, ROOMS, hurtPlayer, setMode, resetGame, step, loadRoom, enterRoom, respawn, updateCamera };
 
-buildLayers(); buildTerrain(); resize(); updateCamera(0, true);
+for (const id in ROOMS) roomGfx(ROOMS[id]);   // 启动时一次生成三个房间的画布，切换房间时不再创建
+buildVignette(); resize(); updateCamera(0, true);
 $('btnStart').focus({ preventScroll: true });
 requestAnimationFrame(frame);
 })();
